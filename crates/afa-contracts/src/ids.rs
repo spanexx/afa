@@ -128,12 +128,6 @@ mod tests {
     }
 
     #[test]
-    fn tenant_id_new_preserves_input_string() {
-        let id = TenantId::new("acme-realty");
-        assert_eq!(id.0, "acme-realty");
-    }
-
-    #[test]
     fn tenant_id_debug_includes_inner_string() {
         let id = TenantId::new("acme-realty");
         let dbg = format!("{id:?}");

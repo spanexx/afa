@@ -42,8 +42,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fixture_carries_the_given_tenant() {
+    fn fixture_carries_the_full_expected_context() {
+        // The fixture's contract is more than just the tenant:
+        // it must use `Actor::Internal("test-fixture")` (so log
+        // lines produced by conformance tests are clearly
+        // distinguishable from real-traffic log lines) and must
+        // leave the deadline `None` (so the fixture does not
+        // accidentally time out a test). The tenant round-trip
+        // is the easy check; the actor and deadline are the
+        // ones most likely to drift if someone "tidies up" the
+        // fixture.
         let ctx = test_execution_context("acme-realty");
         assert_eq!(ctx.tenant_id.as_ref(), "acme-realty");
+        assert_eq!(ctx.actor, Actor::Internal("test-fixture".into()));
+        assert!(
+            ctx.deadline.is_none(),
+            "fixture must not impose a deadline on tests"
+        );
     }
 }

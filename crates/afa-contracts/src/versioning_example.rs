@@ -94,17 +94,16 @@ mod tests {
     use std::sync::Arc;
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v1_is_dyn_compatible() {
+    async fn v1_is_dyn_compatible_and_still_works_after_v2_introduced() {
+        // Two assertions in one body, no duplication:
+        //   1. The `Arc<dyn ExampleThingV1>` cast compiles (the
+        //      dyn-compat contract).
+        //   2. `do_it()` returns `Ok(())` end-to-end.
+        // This is also the regression-proof for FLOW Flow 4: if
+        // V2's addition ever broke V1 (e.g. by re-introducing a
+        // non-object-safe method into V1, or by removing the V1
+        // trait entirely), this test would fail to compile.
         let handle: Arc<dyn ExampleThingV1> = Arc::new(ExampleThingImpl);
-        // If dyn-compat were broken, this line would not compile.
         handle.do_it().await.expect("do_it should succeed");
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn v1_test_unchanged_after_v2_introduced() {
-        // This test is the regression-proof for FLOW Flow 4: a V1
-        // consumer test continues to pass unchanged once V2 lands.
-        let handle: Arc<dyn ExampleThingV1> = Arc::new(ExampleThingImpl);
-        handle.do_it().await.expect("V1 still works alongside V2");
     }
 }
