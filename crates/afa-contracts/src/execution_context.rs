@@ -38,19 +38,28 @@ use tracing::Span;
 // Used by: ExecutionContext (every context has exactly one Actor),
 // and the security engine (the actor controls which permissions
 // apply to the request).
+// `tag = "kind"` is serde's *internally tagged* representation, which
+// works with both unit variants and struct variants (the struct's
+// fields are merged into the top-level JSON object next to the
+// `kind` field). It does NOT work with tuple/newtype variants
+// (e.g. `Channel(String)`) — those serialize as a tagged newtype
+// variant, which `serde_json` rejects. The `Channel` and `Internal`
+// variants are therefore single-field structs, not tuple variants.
+// See `security_serde::secret_unsealed_round_trips_through_json` for
+// the regression-proof that the JSON form round-trips.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Actor {
     /// Inbound from a named channel (e.g. `"http"`, `"grpc"`,
     /// `"scheduler"`).
-    Channel(String),
+    Channel { name: String },
     /// A timer-driven job.
     Timer,
     /// A human operator, reached via the named surface.
     Human { via: String },
     /// An internal call from the kernel or another engine. The string
     /// identifies the caller.
-    Internal(String),
+    Internal { caller: String },
 }
 
 // CID:execution-context-002 - ExecutionContext
@@ -110,7 +119,9 @@ mod tests {
     #[test]
     fn execution_context_new_populates_required_fields() {
         let tenant = TenantId::new("acme-realty");
-        let actor = Actor::Channel("http".into());
+        let actor = Actor::Channel {
+            name: "http".into(),
+        };
         let ctx = ExecutionContext::new(tenant.clone(), actor.clone());
 
         assert_eq!(ctx.tenant_id, tenant);

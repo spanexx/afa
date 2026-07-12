@@ -8,6 +8,10 @@
 //!   `execution_context.rs`.
 //! - `ids`: The tracking number and the tenant name tag. See
 //!   `ids.rs`.
+//! - `security`: The v1 security engine contract: the trait
+//!   `SecurityV1`, the receipt `SecretRef`, the zeroing-on-drop
+//!   handle `UnsealedSecret`, the eleven error buckets, and
+//!   three audit events. See `security.rs`.
 //! - `versioning_example`: A worked example of the "add a new
 //!   socket, never change V1" versioning rule. See
 //!   `versioning_example.rs`.
@@ -27,7 +31,8 @@
 //! CID:afa-contracts-lib-002 -> events
 //! CID:afa-contracts-lib-003 -> execution_context
 //! CID:afa-contracts-lib-004 -> ids
-//! CID:afa-contracts-lib-005 -> versioning_example
+//! CID:afa-contracts-lib-005 -> security
+//! CID:afa-contracts-lib-006 -> versioning_example
 //!
 //! Quick lookup: rg -n "CID:afa-contracts-lib-" crates/afa-contracts/src/lib.rs
 
@@ -52,7 +57,14 @@ pub mod execution_context;
 // Purpose: Re-export the tracking number and tenant name tag.
 // Used by: every request, every event, every log line.
 pub mod ids;
-// CID:afa-contracts-lib-005 - versioning_example
+// CID:afa-contracts-lib-005 - security
+// Purpose: Re-export the v1 security engine contract: the trait,
+// the receipt, the zeroing handle, the error type, and the
+// three audit events. See `security.rs` for the Code Map.
+// Used by: the `afa-security` engine (which implements the
+// trait) and every adapter that needs a secret.
+pub mod security;
+// CID:afa-contracts-lib-006 - versioning_example
 // Purpose: Re-export the worked example of the V1/V2 versioning
 // rule and the dyn-compatibility pattern.
 // Used by: the conformance test in `afa-contract-testing` and
@@ -63,4 +75,8 @@ pub use error::{AfaError, AfaErrorKind, ExampleStoreErrorV1};
 pub use events::{AfaEvent, ExampleLessonCreated};
 pub use execution_context::{Actor, ExecutionContext};
 pub use ids::{CorrelationId, TenantId};
+pub use security::{
+    SecretRef, SecretRotated, SecretSealed, SecretUnsealed, SecurityErrorV1, SecurityV1,
+    UnsealedSecret,
+};
 pub use versioning_example::{ExampleThingImpl, ExampleThingV1, ExampleThingV2};

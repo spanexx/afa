@@ -33,7 +33,9 @@ use afa_contracts::Actor;
 pub fn test_execution_context(tenant: &str) -> ExecutionContext {
     ExecutionContext::new(
         TenantId::new(tenant),
-        Actor::Internal("test-fixture".into()),
+        Actor::Internal {
+            caller: "test-fixture".into(),
+        },
     )
 }
 
@@ -54,7 +56,12 @@ mod tests {
         // fixture.
         let ctx = test_execution_context("acme-realty");
         assert_eq!(ctx.tenant_id.as_ref(), "acme-realty");
-        assert_eq!(ctx.actor, Actor::Internal("test-fixture".into()));
+        assert_eq!(
+            ctx.actor,
+            Actor::Internal {
+                caller: "test-fixture".into(),
+            }
+        );
         assert!(
             ctx.deadline.is_none(),
             "fixture must not impose a deadline on tests"
