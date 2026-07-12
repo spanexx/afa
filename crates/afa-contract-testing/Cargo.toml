@@ -1,0 +1,14 @@
+[package]
+name = "afa-contract-testing"
+version = "0.1.0"
+edition = "2021"
+description = "Conformance-test harness for AFA interfaces."
+license = "Apache-2.0"
+
+[dependencies]
+afa-contracts = { path = "../afa-contracts" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+async-trait = "0.1"
+paste = "1"

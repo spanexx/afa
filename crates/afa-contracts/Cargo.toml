@@ -1,0 +1,17 @@
+[package]
+name = "afa-contracts"
+version = "0.1.0"
+edition = "2021"
+description = "Shared type definitions for the AFA kernel and its plugins."
+license = "Apache-2.0"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+async-trait = "0.1"
+thiserror = "2.0"
+uuid = { version = "1", features = ["v4", "serde"] }
+tracing = "0.1"
+
+[dev-dependencies]
+serde_json = "1.0"
+tokio = { version = "1", features = ["rt", "macros"] }
