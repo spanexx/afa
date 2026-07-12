@@ -1,0 +1,46 @@
+[package]
+name = "afa-security"
+version = "0.1.0"
+edition = "2021"
+description = "The AFA Security Engine v1: AES-256-GCM seal/unseal with a SQLite-backed receipt store, no I/O outside the kernel's purview."
+license = "Apache-2.0"
+
+[dependencies]
+afa-contracts = { path = "../afa-contracts" }
+# AEAD (TRD §3.1) — RustCrypto, opensrc-verified
+aes-gcm = "0.10"
+# Memory zeroing (TRD §3.2) — RustCrypto, opensrc-verified
+zeroize = "1"
+# SQLite (TRD §3.3) — bundled removes host SQLite version concern
+rusqlite = { version = "0.31", features = ["bundled"] }
+# Async runtime pieces (TRD §3.4) — `rt` not needed (we don't run a
+# runtime here), but `sync` is for the `Mutex<Connection>` guard
+tokio = { version = "1", features = ["sync", "macros"] }
+# Dyn-compatibility for `SecurityV1` (TRD §3.5)
+async-trait = "0.1"
+# Engine-only error derives are not needed; `SecurityErrorV1` lives in
+# `afa-contracts` (Phase 0). Listed here as a no-op (the derive is on
+# the contracts side) for documentation.
+# thiserror is intentionally NOT a dep — the engine has no error type
+# of its own; it re-exports `SecurityErrorV1`.
+# Tracing (TRD §3.7)
+tracing = "0.1"
+# Serde (TRD §3.8) — needed for the `SecretRef` and the event
+# re-exports, even though the events themselves are defined in
+# `afa-contracts`.
+serde = { version = "1.0", features = ["derive"] }
+# Chrono (TRD §3.9) — used for the `created_at` column timestamps
+# in `SealedSecretStore` and for the event timestamps in Phase 2.
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# Random nonce generation — used by `crypto::seal`. The `rand`
+# crate is re-exported by `aes-gcm`'s `aead` feature, so we list it
+# directly to make the dependency explicit.
+rand = "0.8"
+
+[dev-dependencies]
+# In-memory temp dirs for the SQLite file in tests.
+tempfile = "3"
+# JSON serialization for the property tests in Phase 2.
+serde_json = "1"
+# `tokio::test` and friends for the async engine tests.
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "test-util"] }
