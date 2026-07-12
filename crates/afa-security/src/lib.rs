@@ -44,7 +44,8 @@
 //! CID:afa-security-lib-002 -> storage
 //! CID:afa-security-lib-003 -> engine
 //! CID:afa-security-lib-004 -> errors
-//! CID:afa-security-lib-005 -> crate-root re-exports
+//! CID:afa-security-lib-005 -> events
+//! CID:afa-security-lib-006 -> crate-root re-exports
 //!
 //! Quick lookup: rg -n "CID:afa-security-lib-" crates/afa-security/src/lib.rs
 
@@ -78,11 +79,22 @@ pub mod engine;
 // planning principle #2: "no new `AfaErrorKind` variants").
 // Used by: every public function in this crate.
 pub mod errors;
+// CID:afa-security-lib-005 - events
+// Purpose: Re-export the three audit-fact structs
+// (`SecretSealed`, `SecretUnsealed`, `SecretRotated`) and
+// provide a single `now()` helper for the `timestamp` field
+// on every published event. See `events.rs` for the
+// per-event Code Map.
+// Used by: `engine::SecurityEngine` (every publish site),
+// the audit-event shape test
+// (`tests/audit_event_shape.rs`).
+pub mod events;
 
-// CID:afa-security-lib-005 - crate-root re-exports
+// CID:afa-security-lib-006 - crate-root re-exports
 // Purpose: Re-export the public types downstream code reaches
 // for most often. Anything not re-exported here is not part of
 // the contract.
 pub use crate::engine::SecurityEngine;
 pub use crate::errors::SecurityError;
+pub use crate::events::{SecretRotated, SecretSealed, SecretUnsealed};
 pub use crate::storage::SealedSecretStore;

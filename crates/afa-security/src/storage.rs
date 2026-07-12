@@ -2,8 +2,8 @@
 //! - `SealedSecretStore`: The vault. Owns the `rusqlite::Connection`
 //!   behind a `tokio::sync::Mutex` so the engine can hand it
 //!   across `await` points without `unsafe`. Exposes
-//!   `open_or_create`, `insert_active`, `get_active`, `get_any`
-//!   (Phase 2), and `rotate` (Phase 2). See the `impl` block below.
+//!   `open_or_create`, `insert_active`, `get_active`, `get_any`,
+//!   and `rotate`. See the `impl` block below.
 //! - `SCHEMA_VERSION`: The on-disk schema version this engine
 //!   supports. A future pack that changes the schema increments
 //!   this constant and adds a migration step to `open_or_create`.
@@ -38,6 +38,8 @@
 //! CID:afa-security-storage-002 -> open_or_create
 //! CID:afa-security-storage-003 -> insert_active
 //! CID:afa-security-storage-004 -> get_active
+//! CID:afa-security-storage-005 -> get_any
+//! CID:afa-security-storage-006 -> rotate
 //!
 //! Quick lookup: rg -n "CID:afa-security-storage-" crates/afa-security/src/storage.rs
 
@@ -239,10 +241,15 @@ impl SealedSecretStore {
     // if found, `None` otherwise. The engine uses `None` to
     // mean "either the secret was never sealed under that
     // name, or the version was wrong, or the version was
-    // rotated." Phase 2 adds `get_any` so the engine can
-    // distinguish `SecretNotFound` from `SecretRotated`.
+    // rotated." `get_any` (CID-005) is the version of this
+    // query that returns the `status` column too, so the
+    // engine can distinguish `SecretNotFound` (no row at
+    // all) from `SecretRotated` (row exists with
+    // `status='rotated'`).
     // Errors: `StorageCorrupted` on SQL failures.
-    // Used by: `engine::SecurityEngine::unseal` (Phase 1).
+    // Used by: `engine::SecurityEngine::unseal` (Phase 1
+    // — Phase 2's updated `unseal` switches to
+    // `get_any`).
     pub async fn get_active(
         &self,
         name: &str,
@@ -270,5 +277,129 @@ impl SealedSecretStore {
         } else {
             Ok(None)
         }
+    }
+
+    // CID:afa-security-storage-005 - get_any
+    // Purpose: Look up the row for `(name, version)`
+    // REGARDLESS of status. Returns
+    // `Some((ciphertext, nonce, status_string))` if any
+    // row exists, `None` otherwise. The engine's
+    // `unseal` uses this to distinguish the three
+    // cases the `get_active` `None`-collapse hid:
+    // (a) no row at all -> `SecretNotFound`,
+    // (b) row with `status='rotated'` -> `SecretRotated`,
+    // (c) row with `status='active'` -> decrypt and
+    //     return handle.
+    // The `status` is returned as a `String` rather than
+    // an enum so the storage layer does not have to know
+    // about the engine's internal enum (the engine is
+    // the only caller and compares to the
+    // `STATUS_ACTIVE` / `STATUS_ROTATED` constants).
+    // Errors: `StorageCorrupted` on SQL failures.
+    // Used by: `engine::SecurityEngine::unseal`
+    // (Phase 2 — replaces the Phase 1 `get_active`
+    // call site).
+    pub async fn get_any(
+        &self,
+        name: &str,
+        version: u32,
+    ) -> Result<Option<(Vec<u8>, [u8; NONCE_LEN], String)>, SecurityError> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT nonce, ciphertext, status FROM sealed_secrets \
+                 WHERE name = ?1 AND version = ?2",
+            )
+            .map_err(|_| SecurityError::StorageCorrupted)?;
+        let mut rows = stmt
+            .query(params![name, version])
+            .map_err(|_| SecurityError::StorageCorrupted)?;
+        if let Some(row) = rows.next().map_err(|_| SecurityError::StorageCorrupted)? {
+            let nonce_vec: Vec<u8> = row.get(0).map_err(|_| SecurityError::StorageCorrupted)?;
+            let ciphertext: Vec<u8> = row.get(1).map_err(|_| SecurityError::StorageCorrupted)?;
+            let status: String = row.get(2).map_err(|_| SecurityError::StorageCorrupted)?;
+            if nonce_vec.len() != NONCE_LEN {
+                return Err(SecurityError::StorageCorrupted);
+            }
+            let mut nonce = [0u8; NONCE_LEN];
+            nonce.copy_from_slice(&nonce_vec);
+            Ok(Some((ciphertext, nonce, status)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    // CID:afa-security-storage-006 - rotate
+    // Purpose: Atomically (a) update the old row's `status`
+    // to `'rotated'` AND (b) insert the new active row,
+    // all inside a single `TransactionBehavior::Immediate`
+    // transaction. The two writes either both happen or
+    // both roll back — a crash between them cannot leave a
+    // "neither row exists" or "both rows are active" state.
+    // (Phase 1's code used `unchecked_transaction()` +
+    // `execute_batch("BEGIN IMMEDIATE")`, which double-starts
+    // a transaction and SQL-errors out — see IMPL §7
+    // Drift #7.) The engine runs the version-compute BEFORE
+    // calling this method (so the AAD string can include the
+    // new version) and passes the already-computed
+    // `new_version` in.
+    // Errors: `StorageCorrupted` on SQL failures (the
+    // `BEGIN IMMEDIATE` is the only thing standing between
+    // us and a duplicate-version race — two parallel
+    // `rotate` calls reading the same `MAX(version)+1` is
+    // the failure mode the transaction prevents).
+    // Used by: `engine::SecurityEngine::rotate` (Phase 2).
+    pub async fn rotate(
+        &self,
+        name: &str,
+        old_version: u32,
+        new_version: u32,
+        new_nonce: &[u8; NONCE_LEN],
+        new_ciphertext: &[u8],
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), SecurityError> {
+        let mut conn = self.conn.lock().await;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|_| SecurityError::StorageCorrupted)?;
+        // Mark the old row as rotated. The engine's
+        // `get_any`-first check (in `engine::rotate`)
+        // already verified the old row exists and is
+        // `status='active'`, so a 0-row update here is
+        // a corruption / race window and we map it to
+        // `StorageCorrupted` rather than silently
+        // ignoring it.
+        let updated = tx
+            .execute(
+                "UPDATE sealed_secrets SET status = ?1 \
+                 WHERE name = ?2 AND version = ?3 AND status = ?4",
+                params![STATUS_ROTATED, name, old_version, STATUS_ACTIVE],
+            )
+            .map_err(|_| SecurityError::StorageCorrupted)?;
+        if updated != 1 {
+            return Err(SecurityError::StorageCorrupted);
+        }
+        // Insert the new active row. Same `(name,
+        // version)` uniqueness check as
+        // `insert_active`; the `BEGIN IMMEDIATE` is
+        // the only thing preventing a duplicate
+        // `new_version` if two parallel rotates
+        // computed the same `MAX(version)+1`.
+        tx.execute(
+            "INSERT INTO sealed_secrets \
+             (name, version, status, nonce, ciphertext, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                name,
+                new_version,
+                STATUS_ACTIVE,
+                &new_nonce[..],
+                new_ciphertext,
+                timestamp.to_rfc3339(),
+            ],
+        )
+        .map_err(|_| SecurityError::StorageCorrupted)?;
+        tx.commit().map_err(|_| SecurityError::StorageCorrupted)?;
+        Ok(())
     }
 }

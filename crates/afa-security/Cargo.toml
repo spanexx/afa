@@ -7,6 +7,10 @@ license = "Apache-2.0"
 
 [dependencies]
 afa-contracts = { path = "../afa-contracts" }
+# The in-process pub/sub bus (Phase 2) — kernel's EventBus.
+# Pulled in only for the bus type itself; the engine does
+# not depend on the rest of the kernel.
+afa-kernel = { path = "../afa-kernel" }
 # AEAD (TRD §3.1) — RustCrypto, opensrc-verified
 aes-gcm = "0.10"
 # Memory zeroing (TRD §3.2) — RustCrypto, opensrc-verified
