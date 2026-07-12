@@ -31,6 +31,8 @@
 //!
 //! Quick lookup: rg -n "CID:error-" crates/afa-contracts/src/error.rs
 
+use serde::{Deserialize, Serialize};
+
 // CID:error-001 - AfaErrorKind
 // Purpose: The closed set of "what kind of trouble" buckets the
 // kernel recognises. Generic code branches on these (e.g. "if
@@ -41,7 +43,7 @@
 // Used by: every `AfaError` implementor (each one maps itself to
 // a bucket), and every generic caller that wants to react to the
 // kind of trouble without knowing the exact error type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AfaErrorKind {
     /// The requested resource does not exist.

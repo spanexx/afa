@@ -3,4 +3,5 @@ resolver = "2"
 members = [
     "crates/afa-contracts",
     "crates/afa-contract-testing",
+    "crates/afa-kernel",
 ]
