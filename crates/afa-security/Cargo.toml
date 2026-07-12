@@ -7,10 +7,19 @@ license = "Apache-2.0"
 
 [dependencies]
 afa-contracts = { path = "../afa-contracts" }
-# The in-process pub/sub bus (Phase 2) — kernel's EventBus.
-# Pulled in only for the bus type itself; the engine does
-# not depend on the rest of the kernel.
-afa-kernel = { path = "../afa-kernel" }
+# The in-process pub/sub bus — the security engine
+# publishes the three audit facts (`SecretSealed`,
+# `SecretUnsealed`, `SecretRotated`) on the kernel's
+# bus. Switched from `afa-kernel` to `afa-bus` in
+# Phase 3 of the security pack: the kernel now
+# constructs the engine inside `Kernel::new`, which
+# would have created a cyclic dep
+# (`afa-kernel → afa-security → afa-kernel`) if the
+# bus had stayed in `afa-kernel`. The bus is now a
+# leaf crate that both `afa-kernel` and
+# `afa-security` depend on, breaking the cycle at
+# the architecture level.
+afa-bus = { path = "../afa-bus" }
 # AEAD (TRD §3.1) — RustCrypto, opensrc-verified
 aes-gcm = "0.10"
 # Memory zeroing (TRD §3.2) — RustCrypto, opensrc-verified
@@ -40,6 +49,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 # crate is re-exported by `aes-gcm`'s `aead` feature, so we list it
 # directly to make the dependency explicit.
 rand = "0.8"
+# Pure-Rust hex decoder — used by `master_key::MasterKey::from_hex`
+# (the env-var reader hands the env-var string straight to
+# `from_hex`, so the engine itself never holds the hex form).
+hex = "0.4"
 
 [dev-dependencies]
 # In-memory temp dirs for the SQLite file in tests.
@@ -48,3 +61,21 @@ tempfile = "3"
 serde_json = "1"
 # `tokio::test` and friends for the async engine tests.
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "test-util"] }
+# Mock HTTP server for the LLM-style integration test
+# (`tests/llm_integration.rs`). Used to stand up a
+# fake HTTP target that the security engine's
+# `seal` → `unseal` → `Authorization: Bearer <unsealed>`
+# pipeline points at. Picked over `httpmock` (see
+# `tests/llm_integration.rs` opening comment) for the
+# test-only request-recording API and the native
+# tokio-friendly async server.
+wiremock = "0.6"
+# The `Kernel` type, used by the LLM-style integration
+# test to spin up a fully-wired `SecurityEngine`
+# without going through the kernel's own test
+# fixtures. The test is in this crate, so this is
+# a `dev-dependency` — the production
+# `afa-security` crate does not depend on
+# `afa-kernel` (the cycle was broken in Phase 3
+# by extracting the bus to `afa-bus`).
+afa-kernel = { path = "../afa-kernel" }

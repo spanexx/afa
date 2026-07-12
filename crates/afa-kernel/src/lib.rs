@@ -1,15 +1,23 @@
 //! Code Map: afa-kernel (the front door)
-//! - `event_bus`: The in-process pub/sub broker. A publisher hands
-//!   it an event, and every subscriber that cares about that event
-//!   type gets a copy. See `event_bus.rs`.
-//! - `kernel`: The top-level composition that owns the Runtime, the
-//!   Scheduler, and the Event Bus, all wrapped in `Arc`s so cloning
-//!   it is cheap. See `kernel.rs`.
-//! - `runtime`: The single entry point (`ingest`) that turns a raw
-//!   event into a fully-dispatched unit of work. See `runtime.rs`.
-//! - `scheduler`: The dispatcher that finds every registered step
-//!   for an event type, runs them concurrently, and isolates
-//!   panics. See `scheduler.rs`.
+//! - `event_bus`: Re-export of the in-process pub/sub broker
+//!   from `afa-bus`. A publisher hands it an event, and every
+//!   subscriber that cares about that event type gets a copy.
+//!   The bus was extracted from this crate in Phase 3 of the
+//!   security pack (see `crates/afa-bus/src/lib.rs`'s
+//!   opening comment for the full rationale). The re-export
+//!   here keeps the public path
+//!   `afa_kernel::event_bus::EventBus` working for
+//!   downstream code that was written before the split.
+//! - `kernel`: The top-level composition that owns the Runtime,
+//!   the Scheduler, the Event Bus, and the Security Engine
+//!   (all wrapped in `Arc`s so cloning is cheap). See
+//!   `kernel.rs`.
+//! - `runtime`: The single entry point (`ingest`) that turns a
+//!   raw event into a fully-dispatched unit of work. See
+//!   `runtime.rs`.
+//! - `scheduler`: The dispatcher that finds every registered
+//!   step for an event type, runs them concurrently, and
+//!   isolates panics. See `scheduler.rs`.
 //! - `Kernel`: Re-exported at the crate root so downstream
 //!   consumers (future channel plugins, future `axum` HTTP
 //!   handlers, future integration tests in other packs) can
@@ -30,7 +38,7 @@
 //! database. It is the post office: it routes, it does not decide.
 //!
 //! CID Index:
-//! CID:afa-kernel-lib-001 -> event_bus
+//! CID:afa-kernel-lib-001 -> event_bus (re-export of afa-bus)
 //! CID:afa-kernel-lib-002 -> kernel
 //! CID:afa-kernel-lib-003 -> runtime
 //! CID:afa-kernel-lib-004 -> scheduler
@@ -40,15 +48,25 @@
 
 #![doc(html_root_url = "https://docs.rs/afa-kernel/0.1.0")]
 
-// CID:afa-kernel-lib-001 - event_bus
-// Purpose: Re-export the in-process pub/sub broker module.
+// CID:afa-kernel-lib-001 - event_bus (re-export of afa-bus)
+// Purpose: Re-export the in-process pub/sub broker module
+// from `afa-bus` so downstream code that was written
+// before the Phase 3 split (which extracted the bus
+// into its own crate to break the
+// afa-kernel → afa-security → afa-kernel cycle) can
+// keep using `afa_kernel::event_bus::EventBus` as
+// before. New code should prefer
+// `use afa_bus::EventBus;` directly. The contents
+// of this module are the exact same types as
+// `afa_bus`; the re-export is purely a path alias.
 // Used by: `Kernel` (composes an `Arc<EventBus>`),
-// `Runtime` (publishes `EventReceived`), `Scheduler` (hands
-// steps an `EventBusHandle`).
-pub mod event_bus;
+// `Runtime` (publishes `EventReceived`), `Scheduler`
+// (hands steps an `EventBusHandle`).
+pub use afa_bus as event_bus;
 // CID:afa-kernel-lib-002 - kernel
 // Purpose: Re-export the top-level composition (Runtime +
-// Scheduler + Event Bus, all `Arc`-backed, cheaply `Clone`-able).
+// Scheduler + Event Bus + Security Engine, all `Arc`-backed,
+// cheaply `Clone`-able).
 // Used by: every consumer of the kernel; this is the type most
 // callers will hold and pass around.
 pub mod kernel;

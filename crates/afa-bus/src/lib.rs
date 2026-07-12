@@ -3,8 +3,8 @@
 //!   subscribers call `subscribe` to get a `Subscription<T>`.
 //! - `Subscription<T>`: The receiving end of a single subscription.
 //!   `recv()` yields the next `(Arc<T>, ExecutionContext)` pair.
-//! - `EventBusHandle`: A thin wrapper around an `Arc<EventBus>` that
-//!   exposes only `publish` (no `subscribe`). Steps receive a
+//! - `EventBusHandle`: A thin wrapper around an `Arc<EventBusCore>`
+//!   that exposes only `publish` (no `subscribe`). Steps receive a
 //!   handle to publish their own events without being able to peek
 //!   at the bus's other subscribers.
 //! - `DEFAULT_SUBSCRIPTION_CAPACITY`: The recommended default
@@ -29,6 +29,22 @@
 //! notices (lazy removal). The board's job is just to route; it
 //! does not read the notices.
 //!
+//! The bus lives in its own crate (`afa-bus`) so both
+//! `afa-kernel` (which composes an `EventBus` for the kernel's
+//! own pub/sub) and `afa-security` (which needs a bus to publish
+//! the `SecretSealed` / `SecretUnsealed` / `SecretRotated`
+//! audit facts) can depend on it. Without the split, Phase 3 of
+//! the security pack would create a cyclic crate dependency:
+//! `afa-kernel` constructs a `SecurityEngine` inside
+//! `Kernel::new`, and the engine needs the bus; but the bus
+//! was in `afa-kernel`, and the engine is in `afa-security`,
+//! so the kernel would need to depend on security, and
+//! security already depends on kernel. The split breaks the
+//! cycle at the architecture level rather than at the
+//! `dev-dependency` level (which would only have masked it
+//! from `cargo build` while leaving the runtime cycle
+//! unresolved).
+//!
 //! CID Index:
 //! CID:event-bus-001 -> EventBus
 //! CID:event-bus-002 -> `Subscription<T>`
@@ -38,7 +54,9 @@
 //! CID:event-bus-006 -> ErasedSender (private trait)
 //! CID:event-bus-007 -> `TypedSender<T>` (private)
 //!
-//! Quick lookup: rg -n "CID:event-bus-" crates/afa-kernel/src/event_bus.rs
+//! Quick lookup: rg -n "CID:event-bus-" crates/afa-bus/src/lib.rs
+
+#![doc(html_root_url = "https://docs.rs/afa-bus/0.1.0")]
 
 use afa_contracts::{AfaEvent, ExecutionContext};
 use std::any::{Any, TypeId};
@@ -73,7 +91,7 @@ type Registry = Arc<RwLock<HashMap<TypeId, Vec<Arc<dyn ErasedSender>>>>>;
 // (the registry mutex, held only across sync operations).
 // Used by: `Kernel` (owns one), `Runtime` (calls `publish` to
 // emit `EventReceived`), `Scheduler` (hands a step an
-// `EventBusHandle` that wraps an `Arc<EventBus>`).
+// `EventBusHandle` that wraps an `Arc<EventBusCore>`).
 pub struct EventBus {
     registry: Registry,
 }
@@ -175,8 +193,7 @@ impl EventBus {
     /// Build an `EventBusHandle` that publishes through this bus.
     /// Used by `Scheduler` to hand a step a "publish-only" view of
     /// the bus.
-    #[allow(dead_code)] // Used by the Scheduler in Phase 2.
-    pub(crate) fn handle(&self) -> EventBusHandle {
+    pub fn handle(&self) -> EventBusHandle {
         EventBusHandle {
             inner: Arc::new(EventBusCore {
                 registry: Arc::clone(&self.registry),

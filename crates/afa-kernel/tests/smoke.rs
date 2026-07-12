@@ -24,9 +24,11 @@ use afa_contracts::{Actor, AfaEvent, TenantId};
 use afa_kernel::runtime::EventReceived;
 use afa_kernel::scheduler::WorkflowStepFailed;
 use afa_kernel::{Kernel, Step};
+use afa_security::MasterKey;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 use tokio::time::timeout;
 
 // Two test-local illustrative event types. These are
@@ -50,13 +52,29 @@ struct Ack {
 
 impl AfaEvent for Ack {}
 
+/// Build a fresh `MasterKey` (deterministic `0x42`
+/// pattern) and a fresh tempdir-backed `secrets.db`
+/// path. The `TempDir` is returned so the test can
+/// keep the path alive for the test's entire scope
+/// (dropping the `TempDir` would delete the file,
+/// which would race with the engine's open
+/// connection on slow filesystems).
+fn fresh_kernel() -> (TempDir, Kernel) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("secrets.db");
+    let key = MasterKey::from([0x42u8; 32]);
+    let kernel = Kernel::new(&key, path).expect("kernel::new");
+    (dir, kernel)
+}
+
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn the_full_pipeline_works_from_a_downstream_consumer_view() {
     // 1. The downstream consumer (this test)
-    //    constructs a `Kernel` with `Kernel::new()`.
+    //    constructs a `Kernel` with
+    //    `Kernel::new(master_key, secrets_db_path)`.
     //    No `pub(crate)` accessors are touched
     //    anywhere in this file.
-    let kernel = Kernel::new();
+    let (_dir, kernel) = fresh_kernel();
 
     // 2. The consumer subscribes to the audit-trail
     //    fact (`EventReceived`) and to the follow-up
@@ -156,7 +174,7 @@ async fn a_panicking_step_does_not_break_the_smoke_test_pipeline() {
     // that panics must not propagate out through
     // `Runtime::ingest` and must result in a
     // `WorkflowStepFailed` fact on the bus.
-    let kernel = Kernel::new();
+    let (_dir, kernel) = fresh_kernel();
     let bus = kernel.event_bus();
     let mut failed = bus.subscribe::<WorkflowStepFailed>(16);
     let mut audit = bus.subscribe::<EventReceived>(16);

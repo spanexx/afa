@@ -92,10 +92,11 @@
 
 use crate::crypto;
 use crate::events;
+use crate::master_key::MasterKey;
 use crate::storage::{SealedSecretStore, STATUS_ACTIVE, STATUS_ROTATED};
 use crate::SecurityError;
+use afa_bus::EventBus;
 use afa_contracts::{Actor, ExecutionContext, SecretRef, SecurityV1, TenantId, UnsealedSecret};
-use afa_kernel::event_bus::EventBus;
 use async_trait::async_trait;
 use rusqlite::TransactionBehavior;
 use std::sync::Arc;
@@ -128,20 +129,31 @@ pub struct SecurityEngine {
 
 impl SecurityEngine {
     /// Construct a new `SecurityEngine`. Caller supplies the
-    /// master key (already hex-decoded and wrapped in
-    /// `Zeroizing`), a `SealedSecretStore` (already opened
-    /// or created), and an `Arc<EventBus>` (the bus the
-    /// kernel owns). The kernel's `Kernel::new` is the
-    /// only caller in the v1 codebase; downstream
+    /// master key (as a `&MasterKey` — the newtype is the
+    /// only way the kernel hands the key to the engine,
+    /// which means the key is guaranteed to be a 32-byte
+    /// value that was either lifted from a 64-char hex
+    /// string via `MasterKey::from_hex` or built from a
+    /// test's deterministic `[u8; 32]` via
+    /// `MasterKey::from`), a `SealedSecretStore` (already
+    /// opened or created), and an `Arc<EventBus>` (the
+    /// bus the kernel owns). The kernel's `Kernel::new`
+    /// is the only caller in the v1 codebase; downstream
     /// adapters receive an `Arc<dyn SecurityV1>` and
     /// never call this directly.
-    pub fn new(
-        key: Zeroizing<[u8; 32]>,
-        store: SealedSecretStore,
-        event_bus: Arc<EventBus>,
-    ) -> Self {
+    pub fn new(key: &MasterKey, store: SealedSecretStore, event_bus: Arc<EventBus>) -> Self {
+        // The engine stores the key inside an
+        // `Arc<Zeroizing<[u8; 32]>>` so (1) the bytes are
+        // wiped on drop (the `Zeroizing` wrapper) and
+        // (2) cloning the engine does not duplicate the
+        // key bytes in the process heap (only the
+        // `Arc`'s refcount is bumped). The newtype's
+        // own `Drop` runs as soon as this function
+        // returns, so the only live copy in the
+        // process is the one inside the engine.
+        let raw: [u8; 32] = *key.as_bytes();
         Self {
-            key: Arc::new(key),
+            key: Arc::new(Zeroizing::new(raw)),
             store,
             event_bus,
         }

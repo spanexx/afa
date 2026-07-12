@@ -7,12 +7,43 @@ license = "Apache-2.0"
 
 [dependencies]
 afa-contracts = { path = "../afa-contracts" }
+# The in-process pub/sub bus (extracted to its own crate in
+# Phase 3 of the security pack so `afa-kernel` and
+# `afa-security` can share it without a cyclic dep — see
+# `crates/afa-bus/src/lib.rs`'s opening comment for the
+# full rationale). Re-exported below as
+# `afa_kernel::event_bus::*` for backwards compatibility.
+afa-bus = { path = "../afa-bus" }
+afa-security = { path = "../afa-security" }
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
 tracing = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
+# Pure-Rust hex decoder — used by `tests/boot_failures.rs`
+# `read_master_key_from_env` to lift the `AFA_MASTER_KEY`
+# env-var string into a `MasterKey` (via
+# `MasterKey::from_hex`). The kernel's *production* boot
+# path does not touch hex directly — the env-var reader
+# in `tests/boot_failures.rs` is the integration surface
+# that proves the boot path is correct.
+hex = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "test-util"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
+# In-memory temp dirs for the `secrets.db` SQLite file in
+# the in-crate `Kernel::new` tests
+# (`crates/afa-kernel/src/kernel.rs`'s `fresh_kernel`
+# helper) and in the integration tests
+# (`tests/boot_failures.rs` and `tests/llm_integration.rs`).
+tempfile = "3"
+# Mock HTTP server for the LLM-style integration test
+# (`tests/llm_integration.rs`). Used to stand up a fake
+# HTTP target that the security engine's
+# `seal` → `unseal` → `Authorization: Bearer <unsealed>`
+# pipeline points at. Picked over `httpmock` (see
+# `tests/llm_integration.rs` opening comment) for the
+# test-only request-recording API and the native
+# tokio-friendly async server.
+wiremock = "0.6"

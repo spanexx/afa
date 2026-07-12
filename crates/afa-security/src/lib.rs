@@ -46,6 +46,7 @@
 //! CID:afa-security-lib-004 -> errors
 //! CID:afa-security-lib-005 -> events
 //! CID:afa-security-lib-006 -> crate-root re-exports
+//! CID:afa-security-lib-007 -> master_key
 //!
 //! Quick lookup: rg -n "CID:afa-security-lib-" crates/afa-security/src/lib.rs
 
@@ -89,6 +90,20 @@ pub mod errors;
 // the audit-event shape test
 // (`tests/audit_event_shape.rs`).
 pub mod events;
+// CID:afa-security-lib-007 - master_key
+// Purpose: The `MasterKey` newtype. The single, type-safe
+// envelope around the 32-byte master key: built by
+// `from_hex` (the one and only path an env-var
+// reader or a test uses), consumed by
+// `SecurityEngine::new` (the one and only path the
+// engine sees the key). The newtype is the only
+// way the kernel touches the key, which lets the
+// wipe-on-drop guarantee be tied to the type (a
+// stray `[u8; 32]` would lose it). See `master_key.rs`
+// for the per-method Code Map.
+// Used by: `SecurityEngine::new` (takes `&MasterKey`),
+// `tests/boot_failures.rs` `read_master_key_from_env`.
+pub mod master_key;
 
 // CID:afa-security-lib-006 - crate-root re-exports
 // Purpose: Re-export the public types downstream code reaches
@@ -97,4 +112,5 @@ pub mod events;
 pub use crate::engine::SecurityEngine;
 pub use crate::errors::SecurityError;
 pub use crate::events::{SecretRotated, SecretSealed, SecretUnsealed};
+pub use crate::master_key::{MasterKey, MASTER_KEY_LEN};
 pub use crate::storage::SealedSecretStore;

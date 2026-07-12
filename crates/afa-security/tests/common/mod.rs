@@ -38,10 +38,10 @@
 //!
 //! Quick lookup: rg -n "CID:afa-security-test-common-" crates/afa-security/tests/common/mod.rs
 
+use afa_bus::EventBus;
 use afa_contracts::{Actor, ExecutionContext, TenantId};
-use afa_kernel::event_bus::EventBus;
 use afa_security::storage::SealedSecretStore;
-use afa_security::SecurityEngine;
+use afa_security::{MasterKey, SecurityEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -55,8 +55,15 @@ use zeroize::Zeroizing;
 // (test-only, never touches production), so the
 // `0xA5u8` pattern is fine.
 // Used by: every test file in this crate.
-pub fn test_key() -> Zeroizing<[u8; 32]> {
-    Zeroizing::new([0xA5u8; 32])
+pub fn test_key() -> MasterKey {
+    // The newtype's `From<[u8; 32]>` impl wraps the
+    // raw bytes; the temporary `Zeroizing` here
+    // guarantees the `0xA5` bytes are wiped on drop
+    // even if a future refactor accidentally drops
+    // the `MasterKey` newtype's wipe-on-Drop
+    // guarantee.
+    let raw = Zeroizing::new([0xA5u8; 32]);
+    MasterKey::from(*raw)
 }
 
 // CID:afa-security-test-common-002 - new_test_db_path
@@ -91,7 +98,7 @@ pub fn new_engine_with_bus() -> (TempDir, Arc<EventBus>, SecurityEngine) {
     let (dir, path) = new_test_db_path();
     let bus = Arc::new(EventBus::new());
     let store = SealedSecretStore::open_or_create(&path).expect("open store");
-    let engine = SecurityEngine::new(test_key(), store, Arc::clone(&bus));
+    let engine = SecurityEngine::new(&test_key(), store, Arc::clone(&bus));
     (dir, bus, engine)
 }
 

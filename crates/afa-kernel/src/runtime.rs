@@ -193,7 +193,9 @@ mod tests {
     use crate::kernel::Kernel;
     use crate::scheduler::WorkflowStepFailed;
     use afa_contracts::{Actor, AfaErrorKind, TenantId};
+    use afa_security::MasterKey;
     use serde::{Deserialize, Serialize};
+    use tempfile::TempDir;
 
     // Test-local illustrative event types. These are
     // NOT in `src/` (per the design principle: only the
@@ -222,6 +224,21 @@ mod tests {
         Actor::Timer
     }
 
+    /// Build a fresh `MasterKey` (deterministic `0x42`
+    /// pattern) and a fresh tempdir-backed `secrets.db`
+    /// path. The `TempDir` is returned so the test can
+    /// keep the path alive for the test's entire scope
+    /// (dropping the `TempDir` would delete the file,
+    /// which would race with the engine's open
+    /// connection on slow filesystems).
+    fn fresh_kernel() -> (TempDir, Kernel) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secrets.db");
+        let key = MasterKey::from([0x42u8; 32]);
+        let kernel = Kernel::new(&key, path).expect("kernel::new");
+        (dir, kernel)
+    }
+
     // ---- The five Phase-3 Runtime tests ----
 
     #[tokio::test]
@@ -230,7 +247,7 @@ mod tests {
         // `EventReceived` audit-trail fact whose
         // `correlation_id` matches the one returned to
         // the caller.
-        let kernel = Kernel::new();
+        let (_dir, kernel) = fresh_kernel();
         let bus = kernel.event_bus();
         let mut received = bus.subscribe::<EventReceived>(16);
 
@@ -254,7 +271,7 @@ mod tests {
     async fn multiple_ingests_get_distinct_correlation_ids() {
         // Flow 2: correlation IDs are unique across
         // the whole process.
-        let kernel = Kernel::new();
+        let (_dir, kernel) = fresh_kernel();
 
         let id_a = kernel
             .runtime()
@@ -288,7 +305,7 @@ mod tests {
         // (which proves the returned ID is the
         // freshly-generated one and not, say, a
         // constant).
-        let kernel = Kernel::new();
+        let (_dir, kernel) = fresh_kernel();
 
         let id_first = kernel
             .runtime()
@@ -325,7 +342,7 @@ mod tests {
         // event flows all the way through to a
         // registered step, and the step's published
         // `Ack` is delivered to a subscriber.
-        let kernel = Kernel::new();
+        let (_dir, kernel) = fresh_kernel();
         let scheduler = kernel.scheduler();
         let bus = kernel.event_bus();
         let mut acks = bus.subscribe::<Ack>(16);
@@ -368,7 +385,7 @@ mod tests {
         // end-to-end form of the Scheduler panic
         // test — the panic must not propagate out
         // through the Runtime.
-        let kernel = Kernel::new();
+        let (_dir, kernel) = fresh_kernel();
         let scheduler = kernel.scheduler();
         let bus = kernel.event_bus();
         let mut failed = bus.subscribe::<WorkflowStepFailed>(16);
