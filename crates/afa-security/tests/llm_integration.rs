@@ -174,26 +174,23 @@ async fn the_kernel_seals_unseals_and_uses_a_secret_in_a_bearer_auth_loop() {
     //    bug does not silently drop them.
     let mut unsealed_events = bus.subscribe::<SecretUnsealed>(LOOP_ITERATIONS * 2);
 
-    // 4. Build a tiny async HTTP client. We
-    //    use the std-lib-friendly `ureq` was
-    //    not added (it is sync-only and would
-    //    require a blocking thread); we use
-    //    `tokio::net::TcpStream` + a hand-rolled
-    //    HTTP/1.1 request instead, which keeps
-    //    the dependency footprint at zero. The
-    //    test is single-threaded (`current_thread`)
-    //    so a synchronous write-then-read loop
-    //    is fine.
-    //
-    //    Actually, hand-rolling an HTTP client
-    //    in a test would be more code than
-    //    warranted. We use `wiremock`'s own
-    //    helper, which exposes the server's URI
-    //    and uses `reqwest` under the hood.
-    //    `reqwest` is a transitive dep of
-    //    `wiremock`, so it does not add a
-    //    direct dep to our `Cargo.toml`.
-
+    // 4. Build a tiny hand-rolled HTTP/1.1
+    //    client. The kernel-core
+    //    design-stability check on 2026-07-12
+    //    locked the project's
+    //    "zero-non-workspace-deps" principle
+    //    for tests; a real HTTP client
+    //    (`ureq`, `reqwest`, etc.) would add a
+    //    direct dep to the security crate's
+    //    dev-deps. The test is
+    //    `current_thread`-flavoured so a
+    //    synchronous `TcpStream::connect` +
+    //    `write_all` + `read_to_end` is the
+    //    right tool (no async runtime juggling
+    //    needed). The mock server's
+    //    `wiremock` is a full HTTP/1.1 server,
+    //    so a well-formed request is enough.
+    let uri = format!("{}/v1/chat", server.uri());
     // 5. The loop. Every iteration:
     //    a. `unseal` the secret.
     //    b. Build the bearer header from the
@@ -205,7 +202,6 @@ async fn the_kernel_seals_unseals_and_uses_a_secret_in_a_bearer_auth_loop() {
     //    e. A `SecretUnsealed` event is
     //       published on the bus for the
     //       audit trail.
-    let uri = format!("{}/v1/chat", server.uri());
     for i in 0..LOOP_ITERATIONS {
         // (a) Unseal — this is the kernel's
         //     own `Arc<dyn SecurityV1>`, so the

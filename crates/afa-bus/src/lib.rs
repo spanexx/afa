@@ -600,10 +600,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publishing_with_zero_subscribers_does_not_error_or_panic() {
+    async fn publishing_with_zero_subscribers_is_a_no_op_and_leaves_the_bus_healthy() {
+        // The "real" assertion is: a publish
+        // against an event type that has no
+        // registered subscribers does not
+        // panic, does not return an error,
+        // and does not leave the bus in a
+        // broken state (a follow-up
+        // subscribe + publish on a
+        // *different* event type must still
+        // work). The `assert_eq!(...,
+        // 0)` on the subscriber count would
+        // be a tautology (we never
+        // subscribed, so the count is
+        // trivially zero); the
+        // post-no-op health check is what
+        // the test is here to prove.
         let bus = EventBus::new();
-        // No subscription registered. Publish must succeed
-        // (it's a no-op fan-out).
         bus.publish(
             TestEvent {
                 payload: "into the void".into(),
@@ -611,8 +624,25 @@ mod tests {
             fresh_ctx(),
         )
         .await;
-        // Reaching here without panic is the assertion.
-        assert_eq!(bus.subscriber_count::<TestEvent>(), 0);
+        // Health check: the bus is still
+        // healthy. Subscribe to a *different*
+        // event type and confirm publish
+        // + recv still round-trips after
+        // the no-op publish. A bus that
+        // was broken by the no-op publish
+        // would fail this round-trip.
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+        struct OtherEvent {
+            value: u32,
+        }
+        impl AfaEvent for OtherEvent {}
+        let mut other_sub = bus.subscribe::<OtherEvent>(4);
+        bus.publish(OtherEvent { value: 42 }, fresh_ctx()).await;
+        let (got, _) = other_sub
+            .recv()
+            .await
+            .expect("post-no-op publish should still round-trip");
+        assert_eq!(got.value, 42);
     }
 
     #[tokio::test]

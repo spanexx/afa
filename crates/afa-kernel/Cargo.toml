@@ -47,3 +47,10 @@ tempfile = "3"
 # test-only request-recording API and the native
 # tokio-friendly async server.
 wiremock = "0.6"
+# Re-exported from `afa-contracts` (where it is a direct
+# dep). Used by `src/runtime.rs` to round-trip the
+# `CorrelationId` through the `uuid::Uuid` parser in the
+# "ingest returns the correlation id" test (a strict
+# shape check that would catch a `Display` impl that
+# emitted a placeholder string instead of a real UUID).
+uuid = "1"

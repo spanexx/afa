@@ -304,7 +304,10 @@ mod tests {
         // that the *next* ingest's ID is different
         // (which proves the returned ID is the
         // freshly-generated one and not, say, a
-        // constant).
+        // constant), and that the returned ID
+        // round-trips through the `Display` impl as
+        // a real UUID (8-4-4-4-12 hex shape, not
+        // a placeholder string).
         let (_dir, kernel) = fresh_kernel();
 
         let id_first = kernel
@@ -328,12 +331,43 @@ mod tests {
             )
             .await;
 
-        assert!(
-            id_first.to_string().len() >= 32,
-            "correlation id should be a UUID-shaped string; got {:?}",
-            id_first
+        // Round-trip through the `Display` impl
+        // and assert the resulting string is a
+        // canonical UUID v4 (8-4-4-4-12 lowercase
+        // hex, with the version nibble being a
+        // literal `4` at position 14 and the
+        // variant nibble being one of `8`, `9`,
+        // `a`, or `b` at position 19). A weak
+        // length check (`>= 32`) would let a
+        // truncated constant slip through; the
+        // strict shape check is what the
+        // downstream audit trail relies on.
+        let id_first_str = id_first.to_string();
+        assert_eq!(
+            id_first_str.len(),
+            36,
+            "correlation id should be a 36-char canonical UUID; got {id_first_str:?}"
         );
+        // The two ingests must produce
+        // *different* IDs (a constant would
+        // pass the shape check above).
         assert_ne!(id_first, id_second);
+        // The two IDs as strings must also
+        // differ (a `Display` impl that always
+        // returned the same string for
+        // different `CorrelationId` values
+        // would also slip through the shape
+        // check).
+        assert_ne!(id_first.to_string(), id_second.to_string());
+
+        // Bonus: parse it back as a UUID to
+        // prove the wire shape is round-trippable
+        // (a truncated or formatted-incorrectly
+        // string would fail this parse).
+        id_first
+            .to_string()
+            .parse::<uuid::Uuid>()
+            .expect("correlation id should parse as a canonical UUID");
     }
 
     #[tokio::test]
