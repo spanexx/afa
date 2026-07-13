@@ -78,6 +78,7 @@ version = "0.1.0"
 dependencies = [
  "afa-bus",
  "afa-contracts",
+ "afa-plugin-llm-http",
  "afa-security",
  "async-trait",
  "futures-util",
@@ -95,8 +96,10 @@ dependencies = [
 name = "afa-llm"
 version = "0.1.0"
 dependencies = [
+ "afa-bus",
  "afa-contracts",
  "async-trait",
+ "chrono",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

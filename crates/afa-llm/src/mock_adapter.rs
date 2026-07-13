@@ -30,12 +30,14 @@
 //!
 //! Quick lookup: rg -n "CID:afa-llm-mock-" crates/afa-llm/src/mock_adapter.rs
 
+use afa_bus::EventBusHandle;
 use afa_contracts::{
-    CompletionChunk, CompletionRequest, CompletionResponse, CompletionStream, ContentBlock,
-    ConversationItem, ExecutionContext, LlmErrorV1, LlmV1, ModelCapabilities, ToolCallRequest,
-    ToolDefinition, Usage,
+    CompletionChunk, CompletionCompleted, CompletionRequest, CompletionResponse, CompletionStream,
+    ContentBlock, ConversationItem, ExecutionContext, LlmErrorV1, LlmV1, ModelCapabilities,
+    ToolCallRequest, ToolDefinition, Usage,
 };
 use async_trait::async_trait;
+use std::sync::OnceLock;
 
 // CID:afa-llm-mock-001 - MockAdapter
 // Purpose: A fake LLM engine for the conformance
@@ -53,13 +55,72 @@ use async_trait::async_trait;
 // downstream test that wants a `&dyn LlmV1`
 // without bringing up a real adapter.
 #[derive(Debug, Default, Clone)]
-pub struct MockAdapter;
+pub struct MockAdapter {
+    /// Optional event-bus handle. When `Some`,
+    /// the `complete` method publishes a
+    /// `CompletionRequested` event before
+    /// dispatching the canned response and a
+    /// `CompletionCompleted` event after the
+    /// response (or a `CompletionFailed` event
+    /// on error). When `None` (the default
+    /// `MockAdapter::new()`), no events are
+    /// published — the conformance suite
+    /// deliberately avoids the bus so it
+    /// stays hermetic. The bus-aware variant
+    /// is built via `MockAdapter::with_event_bus`
+    /// and is used by the multi-turn integration
+    /// test (`tests/multi_turn.rs`).
+    bus: Option<EventBusHandle>,
+    /// The last `Usage` the mock returned,
+    /// cached so the bus-aware `complete`
+    /// method can stamp a realistic
+    /// `prompt_tokens_estimate` on the next
+    /// call's `CompletionRequested` event
+    /// (the real adapters use the same
+    /// `OnceLock<Usage>` pattern: a per-
+    /// adapter-instance cache of the last
+    /// `Usage`, the audit-event estimate is
+    /// `None` on the first call, then the
+    /// cached value on subsequent calls).
+    /// Only meaningful when `bus.is_some()`
+    /// (the conformance suite never reads
+    /// it).
+    last_usage: OnceLock<Usage>,
+}
 
 impl MockAdapter {
     /// Build a fresh `MockAdapter`. Cheap; the
-    /// struct holds no state.
+    /// struct holds no state. The
+    /// conformance-suite form: no bus, no
+    /// audit events, fully hermetic.
     pub fn new() -> Self {
-        Self
+        Self {
+            bus: None,
+            last_usage: OnceLock::new(),
+        }
+    }
+
+    /// Build a fresh `MockAdapter` that
+    /// publishes `CompletionRequested` /
+    /// `CompletionCompleted` /
+    /// `CompletionFailed` audit events on
+    /// the given bus for every `complete`
+    /// call. The canned-response behavior is
+    /// identical to `MockAdapter::new()`; the
+    /// only difference is the side-effect on
+    /// the bus. Used by the multi-turn
+    /// integration test
+    /// (`tests/multi_turn.rs`) to verify that
+    /// 3 sequential `complete()` calls publish
+    /// 3 matching pairs of events with
+    /// distinct correlation ids, and that
+    /// the kernel/engine itself carries no
+    /// per-tenant state between calls.
+    pub fn with_event_bus(bus: EventBusHandle) -> Self {
+        Self {
+            bus: Some(bus),
+            last_usage: OnceLock::new(),
+        }
     }
 
     /// A canned `CompletionRequest` whose
@@ -219,9 +280,111 @@ impl LlmV1 for MockAdapter {
     async fn complete(
         &self,
         request: CompletionRequest,
-        _ctx: &ExecutionContext,
+        ctx: &ExecutionContext,
     ) -> Result<CompletionResponse, LlmErrorV1> {
-        Self::dispatch(request.system.as_deref(), &request.tools)
+        // The bus-aware variant (built via
+        // `MockAdapter::with_event_bus`) publishes
+        // the three audit events for the
+        // multi-turn test. The bus-less variant
+        // (the default `MockAdapter::new()`) skips
+        // the publishing entirely so the
+        // conformance suite stays hermetic.
+        // We publish `CompletionRequested` BEFORE
+        // dispatch (the audit story: "the
+        // adapter is about to do work"), then
+        // either `CompletionCompleted` (success) or
+        // `CompletionFailed` (error) AFTER. The
+        // `prompt_tokens_estimate` is left as
+        // `None` (the mock has no prior Usage to
+        // draw from — that field exists for
+        // real adapters that cache their last
+        // `Usage` for richer audit estimates).
+        if let Some(bus) = &self.bus {
+            use chrono::Utc;
+            // The audit-estimate pattern:
+            // first call has no prior Usage
+            // (None); subsequent calls use the
+            // cached `last_usage` from the
+            // previous call's response. Same
+            // shape the real adapters use
+            // (their `OnceLock<Usage>` is
+            // populated by the response, then
+            // read on the next call's
+            // `CompletionRequested`).
+            let prompt_tokens_estimate = self.last_usage.get().map(|u| u.prompt_tokens);
+            bus.publish(
+                afa_contracts::CompletionRequested {
+                    correlation_id: ctx.correlation_id,
+                    tenant_id: ctx.tenant_id.clone(),
+                    actor: ctx.actor.clone(),
+                    model: "mock".into(),
+                    prompt_tokens_estimate,
+                    has_tools: !request.tools.is_empty(),
+                    has_images: request.messages.iter().any(|m| match m {
+                        ConversationItem::UserMessage { content } => content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::Image { .. })),
+                        _ => false,
+                    }),
+                    timestamp: Utc::now(),
+                },
+                ctx.clone(),
+            )
+            .await;
+        }
+        let started = std::time::Instant::now();
+        let result = Self::dispatch(request.system.as_deref(), &request.tools);
+        if let Some(bus) = &self.bus {
+            use chrono::Utc;
+            let duration_ms = started.elapsed().as_millis() as u64;
+            match &result {
+                Ok(CompletionResponse::TextReply { usage, .. })
+                | Ok(CompletionResponse::ToolCalls { usage, .. }) => {
+                    // Cache the Usage for the next
+                    // call's audit estimate. The
+                    // `OnceLock` is "set once" —
+                    // the FIRST successful call's
+                    // Usage sticks for the rest of
+                    // the adapter's life (the real
+                    // adapters use the same
+                    // once-set pattern; see
+                    // `ResponsesAdapter` for the
+                    // exact shape).
+                    let _ = self.last_usage.set(usage.clone());
+                    bus.publish(
+                        CompletionCompleted {
+                            correlation_id: ctx.correlation_id,
+                            tenant_id: ctx.tenant_id.clone(),
+                            actor: ctx.actor.clone(),
+                            model: "mock".into(),
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                            finish_reason: afa_contracts::FinishReason::Stop,
+                            duration_ms,
+                            timestamp: Utc::now(),
+                        },
+                        ctx.clone(),
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    bus.publish(
+                        afa_contracts::CompletionFailed {
+                            correlation_id: ctx.correlation_id,
+                            tenant_id: ctx.tenant_id.clone(),
+                            actor: ctx.actor.clone(),
+                            model: "mock".into(),
+                            error: e.clone(),
+                            duration_ms,
+                            timestamp: Utc::now(),
+                        },
+                        ctx.clone(),
+                    )
+                    .await;
+                }
+            }
+        }
+        result
     }
 
     async fn stream_complete(
@@ -379,7 +542,7 @@ mod tests {
         // `Stop` and the usage. The test
         // asserts the order and the contents.
         let req = MockAdapter::request_for_text_reply("hi");
-        let adapter = MockAdapter;
+        let adapter = MockAdapter::new();
         let mut stream = adapter
             .stream_complete(req, &ctx())
             .await
@@ -406,7 +569,7 @@ mod tests {
         //      — the arguments JSON string.
         //   3. `Finished { reason: ToolCalls, usage }`.
         let req = MockAdapter::request_for_tool_call("x");
-        let adapter = MockAdapter;
+        let adapter = MockAdapter::new();
         let mut stream = adapter
             .stream_complete(req, &ctx())
             .await

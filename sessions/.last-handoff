@@ -1,232 +1,255 @@
-# Handoff — 2026-07-13 (Session 5, Pack #4 Phase 3)
+# Handoff — 2026-07-13 (Session 7, Pack #4 Phase 4)
 
 ## Resume point
-**Phase 3 (Tool calls + `describe_capabilities` caching) is
-code-complete and all 4 validation gates green** (`cargo fmt
---check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-`cargo test --workspace`, `cargo doc --workspace --no-deps`).
-**Test count: 223 passing, 0 failing across 31 test binaries**
-(up from 218 in Phase 2). **+5 new tests** in this session.
+
+**Pack #4 `llm-engine-baseline` is CODE-COMPLETE.** All 5 phases
+(Phase 0 + Phase 1 + Phase 1.5 + Phase 2 + Phase 3 + Phase 4) are
+landed. All 4 validation gates green: `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`, `cargo doc --workspace --no-deps`.
+
+**Test count: 230 passing, 0 failing across 33 test binaries**
+(up from 223 in Phase 3, +7 in this session: 4 in
+`afa-kernel/tests/llm_integration.rs` + 3 in
+`afa-llm/tests/multi_turn.rs`).
 
 The user asked to **ingest**
-`sessions/Continue LLM Engine Session-phase-3.md` and continue
-Phase 3. The session log showed 2/8 of the Phase 3 todo list done
-in the previous session (streaming tool-call mapper changes in
-both crates), and 6/8 remaining: integration tests (×2),
-describe_capabilities caching test (×1), IMPL doc update, full
-make, handoff.
+`sessions/llm-engine-continue-phase-4.md` and continue Phase 4
+where it stopped. The previous session had landed the two new
+integration test files but `make` had failed on clippy
+(`assert_eq!` with literal bool in `llm_integration.rs` lines
+298-299) and the IMPL Phase 4 status block + task list were
+still unupdated.
 
 ## What this session delivered
 
-### Code (8 files modified)
-1. `crates/afa-plugin-llm-http/src/streaming.rs` — carried
-   over from Session 4 (function_call tracker for
-   `response.output_item.added` + `response.function_call_arguments.delta`).
-2. `crates/afa-plugin-llm-chat-completions/src/streaming.rs`
-   — carried over from Session 4 (`delta.tool_calls[0]`
-   non-terminal handling).
-3. `crates/afa-plugin-llm-http/tests/adapter_streaming.rs` —
-   new `flow_4_streamed_tool_call_yields_deltas_then_finished_tool_calls`
-   wiremock-rs test (1).
-4. `crates/afa-plugin-llm-chat-completions/tests/adapter_streaming.rs`
-   — new `flow_4_streamed_tool_call_yields_deltas_then_finished_tool_calls`
-   wiremock-rs test (1).
-5. `crates/afa-plugin-llm-http/tests/adapter_integration.rs` —
-   new `CountingFakeSecurity` (mock with unseal call counter) +
-   new `describe_capabilities_does_not_touch_security` test
-   that asserts the unseal counter is 0 across two
-   consecutive calls (1).
-6. `crates/afa-llm/src/conformance.rs` — new
-   `stream_tool_call` streaming conformance case (asserts the
-   3-chunk tool-call stream shape against the `MockAdapter`);
-   new `mock_adapter_describe_capabilities_is_well_formed`
-   `#[test]` (asserts the card is well-formed, stable, and
-   sync); 4→5 cases in `std_stream_cases`.
-7. `crates/afa-llm/src/mock_adapter.rs` —
-   `stream_complete` now emits a 3-chunk tool-call stream
-   (id+name `ToolCallDelta` + args `ToolCallDelta` +
-   `Finished { ToolCalls }`) for the `tool_call_basic`
-   case; new `stream_complete_emits_tool_call_deltas_then_finished`
-   `#[cfg(test)]` unit test.
-8. `crates/afa-plugin-llm-chat-completions/src/adapter.rs` —
-   **bug fix**: streaming now sets `stream_options:
-   { include_usage: true }` on the request body. Without it
-   the terminal SSE chunk carries `usage: null` and the
-   adapter reports zero usage. This is a real wire contract
-   most OpenAI-compatible vendors (Groq, Cerebras, Ollama,
-   vLLM, llama.cpp, freellmapi) copy.
+### 1. Clippy fix (1 file)
+- `crates/afa-kernel/tests/llm_integration.rs` lines 298-299:
+  `assert_eq!(req_evt.has_tools, false)` →
+  `assert!(!req_evt.has_tools)` (and same for `has_images`).
+  The `bool_assert_comparison` lint is `-D warnings` so it was
+  a hard error.
 
-### Docs (4 files updated)
-- `docs/features/llm-engine-baseline/PRD-llm-engine-baseline.md`:
-  Phase 3 status = DONE, Phase 3/4 AC items: Flow 4 (tool
-  calls) checked.
-- `docs/features/llm-engine-baseline/TRD-llm-engine-baseline.md`:
-  Implementation status block added.
-- `docs/features/llm-engine-baseline/FLOW-llm-engine-baseline.md`:
-  Implementation status block added; Flow 4 QA checklist
-  items all checked.
+### 2. Doc patch (1 file)
+- `docs/plugins/LlmHttp.md`: clarified the plugin targets the
+  **Responses API** specifically (the previous wording
+  "Chat Completions / Responses API" was ambiguous after the
+  sibling `afa-plugin-llm-chat-completions` crate was
+  introduced in Phase 1.5). Now reads as a single-wire
+  plugin; points to the IMPL Phase 1.5 section for the
+  sibling. `docs/engines/LLM.md` and `docs/CONTEXT.md`
+  already matched (the Phase 1.5 grill pre-work had already
+  updated them; this session verified all 14 LLM glossary
+  entries are present and the 3 events + 13 error variants +
+  5 finish reasons are accurately described).
+
+### 3. IMPL doc updates (1 file)
 - `docs/features/llm-engine-baseline/IMPL-llm-engine-baseline.md`:
-  Phase 3 status = DONE; Phase 3 tasks all `[x]` (plus two
-  new ones for the Chat Completions mirror + the
-  `stream_options: { include_usage: true }` bug fix); new
-  §5 "Design locks (Phase 3 multi-turn tool-call flow)"
-  subsection that locks:
-    1. Multi-turn tool-call flow is "fold into `complete()`
-       (stateless, Claude pattern)" — the engine has no
-       session state, the workflow carries the conversation
-       history in the `CompletionRequest`.
-    2. `describe_capabilities` is sync, no `async`, no
-       `ctx`, no I/O, no `security.unseal`.
-    3. The streaming tool-call contract:
-       `ToolCallDelta { id, name_delta, arguments_delta }` +
-       `Finished { reason: ToolCalls, ... }`. The
-       `Finished.reason: ToolCalls` is **inferred** from the
-       function_call output item for the OpenAI Responses
-       API (the wire does not carry an explicit
-       `finish_reason`); for the OpenAI Chat Completions API
-       it is sent explicitly as `finish_reason: "tool_calls"`
-       and maps 1:1.
+  - Phase 4 status block: now **DONE** with full rationale
+    (the 2 new test files, 4 events, 3 multi-turn tests,
+    docs sync, all 4 gates green, 230 test count).
+  - Phase 4 task list: every task `[x]` (9 of 9), with
+    inline notes on the clippy fix and the `LlmHttp.md` patch.
 
 ## Key design decisions locked in this session
 
-1. **Multi-turn tool-call flow is stateless at engine
-   level.** The `LlmV1` trait has no `session_id`, no
-   `register_assistant_message()`, no `next_turn()`. The
-   workflow carries the conversation history in every
-   `CompletionRequest`. This is the Claude pattern.
-2. **`describe_capabilities` is sync.** A future Phase 5+
-   test that adds `.await` to it will fail to compile.
-3. **The Chat Completions adapter collapses
-   `delta.tool_calls[0]` to the first item** (parallel
-   tool calls is a future LlmV1 v2 concern). Subsequent
-   arguments-delta chunks have empty `id` (the wire
-   format does NOT repeat the id on arguments-only
-   chunks) and empty `name_delta`; the consumer
-   remembers the id from the first chunk and reassembles.
-4. **The OpenAI Responses adapter infers
-   `Finished.reason: ToolCalls`** from the presence of a
-   `function_call` output item in `response.completed`,
-   even though the wire does not carry an explicit
-   `finish_reason`.
-5. **`stream_options: { include_usage: true }` is a real
-   wire contract** for the OpenAI Chat Completions API.
-   Without it, `usage` is always null in streaming. The
-   bug fix in this session was a regression caught by the
-   new Flow 4 test (the test asserted
-   `completion_tokens: 18` and the first run returned 0;
-   the new code is the cause + the fix).
+None — Phase 4 is integration + CI + documentation, not new
+design. All design decisions are unchanged from Phases 0–3
+(see the previous handoffs for the full design lock list:
+LlmV1 stateless, `describe_capabilities` sync, 3-step key
+wiring, raw reqwest SSE in both sibling crates, the
+multi-turn fold-into-`complete` pattern, the streaming
+tool-call contract, the 13 LlmErrorV1 variants).
 
 ## What is still open
 
-- **Phase 4 (Integration + final CI + documentation)** is
-  NOT STARTED. The IMPL doc keeps the Phase 4 task list
-  intact (boots a real `Kernel` with a real
-  `ResponsesAdapter` pointed at wiremock-rs; runs the full
-  end-to-end round-trip; Flow 11 multi-turn stateless
-  test).
-- **Working tree is dirty** (8 files modified, 0 staged).
-  The user has not committed. Suggested commit message at
-  the bottom of this handoff.
-- **Docs are not committed** (the docs/ tree is a separate
-  git repo or uncommitted; verify with `git -C
-  /home/spanexx/Shared/agents status`).
+- **Working tree is dirty** (7 files modified or new, 0
+  staged). The user has not committed Phase 4. Suggested
+  commit message at the bottom of this handoff.
+- **Pack #4 is complete.** The next pack is up to the user
+  (see `docs/roadmap/FEATURE_PACKS.md` for the backlog;
+  pack #5 candidates include `mcp-tool-router`,
+  `llm-adapter-claude`, `key-wiring-dry`, the async-openai
+  removal cleanup, etc.).
+- **Docs are not in git** (the docs/ tree is not a git repo;
+  doc changes persist on disk only — by design, per the
+  Phase 1.5 handoff note).
 
 ## Skills the next agent will likely need
 
 - `situation-awareness` — to re-establish context after
   the user's manual commit.
-- `grill-with-docs` — if a Phase 4 question pops up that
-  is not already covered by the IMPL/PRD/FLOW/TRD docs.
-- `feature-pipeline-review` — to validate the Phase 3
-  implementation matches the IMPL doc (it does; we
-  cross-checked the 8 IMPL tasks before stopping).
+- `grill-with-docs` — if a new pack question pops up that
+  needs to be locked against the PRD/TRD.
+- `feature-pipeline` — to start a new pack (PRD → TRD → FLOW
+  → IMPL → code).
 - `handoff` — to compact at the end of the next session.
 
 ## Suggested commit message (for the user's manual commit)
 
+Title:
+
 ```
-feat(llm): Phase 3 — tool calls + describe_capabilities
+Pack #4 llm-engine-baseline Phase 4: integration + CI + docs (pack complete)
+```
 
-Pack #4 (LLM Integration) Phase 3 lands. Both
-afa-plugin-llm-http (OpenAI Responses) and
-afa-plugin-llm-chat-completions (Chat Completions)
-now map streaming tool calls to the
-CompletionChunk::ToolCallDelta +
-Finished { reason: ToolCalls } contract.
+Body (HEREDOC-ready):
 
-afa-plugin-llm-http:
-  * streaming.rs: track `function_call` output items
-    via `response.output_item.added`; emit
-    `ToolCallDelta { id, name_delta, "" }` on the
-    first event and `ToolCallDelta { id, "",
-    arguments_delta }` on each subsequent
-    `response.function_call_arguments.delta`;
-    infer `Finished.reason: ToolCalls` from the
-    function_call presence.
-  * tests/adapter_streaming.rs: new
-    `flow_4_streamed_tool_call_*` wiremock-rs test
-    (5 SSE events → 1 ToolCallDelta + 3 args-delta
-    + Finished).
-  * tests/adapter_integration.rs: new
-    `CountingFakeSecurity` + new
-    `describe_capabilities_does_not_touch_security`
-    test (asserts the unseal counter is 0 across
-    two consecutive calls).
+```bash
+git add Cargo.lock \
+  crates/afa-kernel/Cargo.toml \
+  crates/afa-kernel/src/kernel.rs \
+  crates/afa-kernel/tests/llm_integration.rs \
+  crates/afa-llm/Cargo.toml \
+  crates/afa-llm/src/mock_adapter.rs \
+  crates/afa-llm/tests/multi_turn.rs
 
-afa-plugin-llm-chat-completions:
-  * streaming.rs: collapse
-    `delta.tool_calls[0]` to the first item;
-    emit the same ToolCallDelta shape.
-  * adapter.rs: BUG FIX — streaming now sets
-    `stream_options: { include_usage: true }` on
-    the request body. Without it the terminal SSE
-    chunk carries `usage: null` and the adapter
-    reports zero usage (a real wire contract
-    most OpenAI-compatible vendors copy).
-  * tests/adapter_streaming.rs: new
-    `flow_4_streamed_tool_call_*` wiremock-rs test
-    (6 SSE events → 1 role-establishing + 1
-    id+name ToolCallDelta + 3 args-delta +
-    Finished).
+git commit -m "$(cat <<'EOF'
+Pack #4 llm-engine-baseline Phase 4: integration + CI + docs (pack complete)
+
+Phase 4 of llm-engine-baseline lands the two cross-crate
+integration test files and the documentation sync that
+close out the pack. After this commit, all 5 phases
+(0 + 1 + 1.5 + 2 + 3 + 4) are landed and all 4 validation
+gates are green. Pack #4 is code-complete.
+
+afa-kernel:
+  * src/kernel.rs: CapabilityRegistry gains a
+    register_llm(key, Arc<dyn LlmV1>, SecretRef) method
+    + llm(key) accessor (additive — does not modify any
+    existing method's signature). A second register_llm
+    call with the same key returns LmAlreadyRegistered.
+  * Cargo.toml: gains chrono, afa-llm, afa-bus,
+    wiremock-rs (dev), eventsource-stream (dev).
+  * tests/llm_integration.rs (NEW, 4 tests):
+    1. kernel_llm_returns_none_before_registration:
+       a fresh Kernel with no adapter registered returns
+       None (not an error) from llm("default").
+    2. kernel_register_llm_twice_returns_lm_already_registered:
+       a second register_llm("default", ...) call
+       surfaces LmAlreadyRegistered (the registry
+       refuses to silently overwrite).
+    3. kernel_end_to_end_round_trip_buffers_response_and_publishes_audit_pair:
+       a real Kernel + CapabilityRegistry + ResponsesAdapter
+       pointed at a wiremock-rs server. The test calls
+       kernel.llm("default").complete(req, &ctx).await
+       end-to-end and asserts: the response is Ok with
+       the canned text + correct Usage; the bus received
+       exactly one CompletionRequested and exactly one
+       CompletionCompleted with matching correlation_id;
+       the CompletionCompleted event carries the right
+       prompt_tokens, completion_tokens, finish_reason,
+       model, has_tools=false, has_images=false.
+    4. kernel_end_to_end_streaming_chunk_ordering:
+       the same Kernel+registry+adapter stack, but via
+       stream_complete. Asserts the consumer reads 2
+       TextDelta chunks then a Finished { Stop, usage }
+       chunk in the right order, and the bus receives
+       one CompletionCompleted with finish_reason=Stop.
 
 afa-llm:
-  * src/conformance.rs: new `stream_tool_call`
-    streaming conformance case (5th case; locks
-    the 3-chunk tool-call stream shape);
-    new `mock_adapter_describe_capabilities_is_well_formed`
-    test (asserts the card is well-formed, stable,
-    and sync).
-  * src/mock_adapter.rs: stream_complete now
-    emits a 3-chunk tool-call stream for
-    `tool_call_basic`; new
-    `stream_complete_emits_tool_call_deltas_then_finished`
-    unit test.
+  * src/mock_adapter.rs: the MockAdapter's complete()
+    and stream_complete() now also publish the 3 audit
+    events (CompletionRequested, CompletionCompleted,
+    CompletionFailed) on the bus when a bus is
+    configured (the adapter's bus field is Option<Arc<EventBus>>
+    so the no-bus case stays valid). Caches the last
+    Usage in a OnceLock for prompt_tokens_estimate on
+    the next call. New dispatch("conformance:rate_limited")
+    system-prompt tag returns Err(LlmErrorV1::RateLimited)
+    for the failure-event test.
+  * Cargo.toml: gains chrono, afa-bus, wiremock-rs (dev).
+  * tests/multi_turn.rs (NEW, 3 tests):
+    1. mock_adapter_publishes_three_requested_completed_pairs_for_three_sequential_calls:
+       3 sequential complete() calls. Asserts: each
+       returns Ok; the bus receives exactly 3 distinct
+       correlation_ids; each correlation_id is shared
+       between the Requested and Completed events of
+       its call; no Failed events; no event leaks
+       across the 3 calls (Flow 11 — the engine is
+       stateless at this level).
+    2. mock_adapter_publishes_a_completion_failed_event_when_the_request_dispatches_to_an_error:
+       a request whose system-prompt tag routes to the
+       rate_limited dispatch. Asserts: the call returns
+       Err(LlmErrorV1::RateLimited); the bus receives
+       one CompletionRequested then one CompletionFailed
+       with error: LlmErrorV1::RateLimited and matching
+       correlation_id.
+    3. mock_adapter_without_bus_publishes_no_events:
+       the same multi-turn scenario but with bus=None.
+       Asserts: all 3 calls return Ok; the no-bus case
+       does not panic, does not log an error, and
+       silently drops the publish (the adapter's
+       bus field is Option<Arc<EventBus>>, so the
+       absence of a bus is a valid configuration).
 
-docs/features/llm-engine-baseline/{PRD,TRD,FLOW,IMPL}.md:
-  * Phase 3 status = DONE in all four.
-  * IMPL §3 Phase 3 tasks all [x] (added two
-    new tasks: the Chat Completions mirror and
-    the stream_options bug fix).
-  * IMPL §5 new "Design locks (Phase 3
-    multi-turn tool-call flow)" subsection that
-    locks: (a) the fold-into-complete pattern
-    is the caller's job, not the engine's;
-    (b) describe_capabilities is sync, no
-    async, no ctx, no I/O, no security.unseal;
-    (c) the streaming tool-call contract.
-  * FLOW Flow 4 QA checklist items all checked.
+Validation:
+  * cargo fmt --all -- --check     green
+  * cargo clippy --workspace --all-targets -- -D warnings
+                                    green (1 fix this
+                                    session: assert_eq!
+                                    with literal bool in
+                                    llm_integration.rs
+                                    lines 298-299)
+  * cargo test --workspace          230 passing,
+                                    0 failed
+  * cargo doc --workspace --no-deps green
 
-Test count: 223 passing, 0 failing across 31
-test binaries (up from 218 in Phase 2; +5 new
-tests in this phase).
+Test count: 223 -> 230 (+7: 4 in llm_integration +
+3 in multi_turn). Test binaries: 31 -> 33.
+
+docs/features/llm-engine-baseline/IMPL-llm-engine-baseline.md:
+  * Phase 4 status block: NOT STARTED -> DONE with full
+    rationale (4 events audited, 3 multi-turn tests, docs
+    sync verified, 230 test count, all 4 gates green).
+  * Phase 4 task list: 9 of 9 tasks [x] (one inline
+    note on the bool_assert_comparison clippy fix).
+  * Pack #4 is now code-complete; no remaining IMPL
+    tasks. Next pack per docs/roadmap/FEATURE_PACKS.md.
+
+docs/plugins/LlmHttp.md:
+  * Clarified the plugin targets the Responses API
+    specifically (the previous "Chat Completions /
+    Responses API" wording was ambiguous after the
+    sibling afa-plugin-llm-chat-completions crate was
+    introduced in Phase 1.5). The sibling is documented
+    in IMPL §"Phase 1.5".
+
+docs/engines/LLM.md and docs/CONTEXT.md:
+  * Verified to match the implementation. No changes
+    needed; the Phase 1.5 grill pre-work had already
+    updated both.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+EOF
+)"
 ```
+
+The user runs the `git commit` command manually (per project
+memory: "Prefers to execute git commits and commands manually;
+requests the assistant provide the content (e.g., commit
+messages) rather than assuming control.").
 
 ## Files to read first when resuming
 
-- [IMPL-llm-engine-baseline.md](file:///home/spanexx/Shared/agents/docs/features/llm-engine-baseline/IMPL-llm-engine-baseline.md) (Phase 3 + §5 design locks)
-- [FLOW-llm-engine-baseline.md](file:///home/spanexx/Shared/agents/docs/features/llm-engine-baseline/FLOW-llm-engine-baseline.md) (Flow 4 + Flow 11)
-- [PRD-llm-engine-baseline.md](file:///home/spanexx/Shared/agents/docs/features/llm-engine-baseline/PRD-llm-engine-baseline.md) (Phase 3/4 AC items)
-- `crates/afa-llm/src/conformance.rs` (the 5 streaming conformance cases)
-- `crates/afa-plugin-llm-http/src/streaming.rs` (the function_call tracker)
-- `crates/afa-plugin-llm-chat-completions/src/streaming.rs` (the delta.tool_calls[0] collapse)
-- `crates/afa-plugin-llm-chat-completions/src/adapter.rs` (the stream_options bug fix)
+- [IMPL-llm-engine-baseline.md](file:///home/spanexx/Shared/agents/docs/features/llm-engine-baseline/IMPL-llm-engine-baseline.md) (Phase 4 = DONE; pack complete)
+- `crates/afa-kernel/tests/llm_integration.rs` (the 4-test integration suite)
+- `crates/afa-llm/tests/multi_turn.rs` (the 3-test Flow 11 suite)
+- `crates/afa-llm/src/mock_adapter.rs` (the bus-aware MockAdapter)
+- `crates/afa-kernel/src/kernel.rs` (the additive `register_llm` + `llm` methods on `CapabilityRegistry`)
+
+## What's in the working tree (7 files for the commit)
+
+```
+M Cargo.lock
+M crates/afa-kernel/Cargo.toml
+M crates/afa-kernel/src/kernel.rs
+A crates/afa-kernel/tests/llm_integration.rs
+M crates/afa-llm/Cargo.toml
+M crates/afa-llm/src/mock_adapter.rs
+A crates/afa-llm/tests/multi_turn.rs
+```
+
+Plus 2 unstaged doc changes (not in git, by design):
+- `docs/features/llm-engine-baseline/IMPL-llm-engine-baseline.md` (Phase 4 status + tasks)
+- `docs/plugins/LlmHttp.md` (Responses API clarification)

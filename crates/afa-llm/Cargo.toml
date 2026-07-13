@@ -7,6 +7,14 @@ license = "Apache-2.0"
 
 [dependencies]
 afa-contracts = { path = "../afa-contracts" }
+# The in-process pub/sub bus. The `MockAdapter::with_event_bus`
+# constructor takes an `EventBusHandle` from this crate so the
+# multi-turn integration test (`tests/multi_turn.rs`) can verify
+# that 3 sequential `complete()` calls publish 3 matching pairs
+# of `CompletionRequested` + `CompletionCompleted` events on a
+# shared bus. The conformance suite, which uses
+# `MockAdapter::new()`, does not need the bus.
+afa-bus = { path = "../afa-bus" }
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
 tracing = "0.1"
@@ -14,6 +22,15 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 zeroize = "1"
+# Used by the bus-aware `MockAdapter` variant
+# (`MockAdapter::with_event_bus`) to stamp the
+# `timestamp` field on the `CompletionRequested` /
+# `CompletionCompleted` / `CompletionFailed`
+# audit events it publishes from `complete()`.
+# The same `Utc::now()` source-of-truth is used
+# by the real adapters (e.g. `ResponsesAdapter`),
+# so the timestamps line up across adapters.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "test-util"] }

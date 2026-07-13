@@ -30,11 +30,11 @@
 //!
 //! Quick lookup: rg -n "CID:kernel-" crates/afa-kernel/src/kernel.rs
 
-use crate::capability_registry::CapabilityRegistry;
+use crate::capability_registry::{CapabilityRegistry, RegisterError};
 use crate::event_bus::{EventBus, EventBusHandle};
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
-use afa_contracts::{SecurityErrorV1, SecurityV1};
+use afa_contracts::{LlmV1, SecurityErrorV1, SecurityV1};
 use afa_security::{MasterKey, SealedSecretStore, SecurityEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -188,6 +188,46 @@ impl Kernel {
     #[allow(dead_code)] // Used by future packs (afa-cli, axum handlers, etc.).
     pub fn security(&self) -> Arc<dyn SecurityV1> {
         Arc::clone(&self.security)
+    }
+
+    /// Register an LLM adapter with the kernel's
+    /// `CapabilityRegistry`. This is the
+    /// composition-root entry point for the LLM
+    /// capability: an `axum` bootstrap handler or
+    /// a CLI `afa kernel start` command builds a
+    /// concrete adapter (e.g. `ResponsesAdapter`
+    /// pointed at the real OpenAI endpoint), wraps
+    /// it in an `Arc<dyn LlmV1>`, and hands it to
+    /// this method. A second call is a programmer
+    /// error and returns
+    /// `RegisterError::LlmAlreadyRegistered` (the
+    /// registry holds a single LLM slot — see
+    /// `docs/engines/CapabilityRegistry.md`).
+    /// Phase 4 integration tests use this to wire
+    /// a real `ResponsesAdapter` into a fresh
+    /// `Kernel` and exercise the full
+    /// `Kernel → CapabilityRegistry → LlmV1 → wire
+    /// → audit bus` round-trip.
+    pub fn register_llm(&self, adapter: Arc<dyn LlmV1>) -> Result<(), RegisterError> {
+        self.capabilities
+            .lock()
+            .expect("capabilities mutex")
+            .register_llm(adapter)
+    }
+
+    /// Hand out a clone of the `Arc<dyn LlmV1>` the
+    /// registry is currently holding, or `None` if
+    /// no adapter has been registered. Mirrors
+    /// `security()` in shape (a fresh `Arc` per
+    /// call, the underlying instance is shared).
+    /// Used by every workflow that needs an LLM —
+    /// `kernel.llm().expect("no LLM configured")`
+    /// is the canonical pattern. A workflow that
+    /// runs before the bootstrap registers an
+    /// adapter sees `None` and surfaces a clear
+    /// "LLM not configured" error.
+    pub fn llm(&self) -> Option<Arc<dyn LlmV1>> {
+        self.capabilities.lock().expect("capabilities mutex").llm()
     }
 }
 

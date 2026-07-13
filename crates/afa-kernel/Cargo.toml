@@ -60,6 +60,17 @@ tempfile = "3"
 # test-only request-recording API and the native
 # tokio-friendly async server.
 wiremock = "0.6"
+# Concrete LLM adapter for the Phase 4 end-to-end
+# integration test (`tests/llm_integration.rs`).
+# Used in the `dev-dependencies` section (not
+# `dependencies`) to preserve the layering:
+# `afa-kernel` is the composition root and ships
+# only the trait-object view; the concrete
+# `ResponsesAdapter` lives in its own plugin crate
+# and is wired in by the bootstrap. The integration
+# test is the only place in the kernel crate that
+# materialises a concrete adapter.
+afa-plugin-llm-http = { path = "../afa-plugin-llm-http" }
 # Re-exported from `afa-contracts` (where it is a direct
 # dep). Used by `src/runtime.rs` to round-trip the
 # `CorrelationId` through the `uuid::Uuid` parser in the
