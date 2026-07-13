@@ -463,9 +463,33 @@ impl LlmV1 for ChatCompletionsAdapter {
 
         // Step 2: build the request body
         // (same shape as `complete`),
-        // then add `"stream": true`.
+        // then add `"stream": true`
+        // AND `"stream_options":
+        // { "include_usage": true }`.
+        // The OpenAI Chat Completions
+        // API does NOT include `usage`
+        // in a streaming response
+        // unless `stream_options.
+        // include_usage` is explicitly
+        // set to `true` in the request.
+        // Without it, the terminal SSE
+        // chunk carries `usage: null`
+        // and the adapter reports
+        // `prompt_tokens: 0,
+        // completion_tokens: 0` in the
+        // `Finished` chunk and on the
+        // `CompletionCompleted` audit
+        // event. This is a real wire
+        // contract — most
+        // OpenAI-compatible vendors
+        // (Groq, Cerebras, Ollama,
+        // vLLM, llama.cpp, freellmapi)
+        // copy the same opt-in pattern.
         let mut body = map_request(&request, &self.config.model)?;
         body["stream"] = serde_json::Value::Bool(true);
+        body["stream_options"] = serde_json::json!({
+            "include_usage": true,
+        });
 
         // Step 3: unseal the initial key.
         // On failure we return the

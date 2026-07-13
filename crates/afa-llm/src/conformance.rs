@@ -387,10 +387,11 @@ mod tests {
         }
     }
 
-    /// The 4 streaming conformance cases. Every
+    /// The 5 streaming conformance cases. Every
     /// adapter that claims to be
-    /// "conformance-clean" must pass all 4
-    /// against the `MockAdapter`.
+    /// "conformance-clean" must pass all 5
+    /// against the `MockAdapter`. Phase 3
+    /// added the `stream_tool_call` case.
     fn std_stream_cases() -> Vec<StreamCase> {
         vec![
             // Case 1: happy path. The
@@ -590,15 +591,133 @@ mod tests {
                     })
                 }),
             },
+            // Case 5 (Phase 3):
+            // streamed tool
+            // call. The mock
+            // dispatches
+            // `tool_call_basic`
+            // and the mock's
+            // `stream_complete`
+            // sends a 3-chunk
+            // stream:
+            //   1. `ToolCallDelta
+            //      { id, name, "" }`
+            //   2. `ToolCallDelta
+            //      { MAYBE-id, "",
+            //      args }` — id is
+            //      optional on the
+            //      args-only chunk
+            //      (vendor-dependent;
+            //      see chunk-2 check
+            //      comment below)
+            //   3. `Finished
+            //      { reason:
+            //      ToolCalls }`
+            // This case locks
+            // in the streaming
+            // tool-call contract
+            // every adapter
+            // must implement.
+            StreamCase {
+                name: "stream_tool_call",
+                request: MockAdapter::request_for_tool_call("search"),
+                ctx_factory: Box::new(mock_ctx),
+                check: Box::new(|stream| {
+                    Box::pin(async move {
+                        let chunks = StreamCase::drain(stream, Duration::from_secs(2)).await;
+                        assert_eq!(
+                            chunks.len(),
+                            3,
+                            "expected 3 chunks (2 deltas + 1 finished); got {}",
+                            chunks.len()
+                        );
+                        // Chunk 1: id + name.
+                        match &chunks[0] {
+                            CompletionChunk::ToolCallDelta {
+                                id,
+                                name_delta,
+                                arguments_delta,
+                            } => {
+                                if id.is_empty() {
+                                    return Err("first delta must carry a non-empty id".into());
+                                }
+                                if name_delta != "search_listings" {
+                                    return Err(format!(
+                                        "first delta must carry name_delta=search_listings; got {name_delta:?}"
+                                    ));
+                                }
+                                if !arguments_delta.is_empty() {
+                                    return Err(format!(
+                                        "first delta must carry empty arguments_delta; got {arguments_delta:?}"
+                                    ));
+                                }
+                            }
+                            other => {
+                                return Err(format!(
+                                    "expected first chunk to be ToolCallDelta(id+name); got {other:?}"
+                                ));
+                            }
+                        }
+                        // Chunk 2: args.
+                        // The `id` is OPTIONAL on the args-only
+                        // chunk — vendor-dependent. OpenAI Responses
+                        // sends `item_id` on every event (so the id
+                        // is non-empty here); Chat Completions
+                        // vendors vary (some send it on the first
+                        // chunk only, others repeat it). The consumer
+                        // just needs at least one non-empty id (the
+                        // first chunk) and reassembles.
+                        match &chunks[1] {
+                            CompletionChunk::ToolCallDelta {
+                                id: _,
+                                name_delta,
+                                arguments_delta,
+                            } => {
+                                if !name_delta.is_empty() {
+                                    return Err(format!(
+                                        "second delta must carry empty name_delta; got {name_delta:?}"
+                                    ));
+                                }
+                                if arguments_delta.is_empty() {
+                                    return Err(
+                                        "second delta must carry non-empty arguments_delta".into(),
+                                    );
+                                }
+                            }
+                            other => {
+                                return Err(format!(
+                                    "expected second chunk to be ToolCallDelta(args); got {other:?}"
+                                ))
+                            }
+                        }
+                        // Chunk 3: Finished { ToolCalls }.
+                        match &chunks[2] {
+                            CompletionChunk::Finished { reason, .. } => {
+                                if *reason != afa_contracts::FinishReason::ToolCalls {
+                                    return Err(format!(
+                                        "expected Finished {{ ToolCalls }}; got {reason:?}"
+                                    ));
+                                }
+                            }
+                            other => {
+                                return Err(format!(
+                                    "expected third chunk to be Finished; got {other:?}"
+                                ))
+                            }
+                        }
+                        Ok(())
+                    })
+                }),
+            },
         ]
     }
 
-    /// Run the 4 streaming conformance cases
+    /// Run the 5 streaming conformance cases
     /// against any adapter that implements
     /// `LlmV1`. The mock adapter passes all
-    /// 4 (the mock's `stream_complete` is
+    /// 5 (the mock's `stream_complete` is
     /// already conformance-clean from
-    /// Phase 0).
+    /// Phase 0 + Phase 3).
     pub async fn run_streaming_conformance_suite(adapter: &dyn LlmV1) -> ConformanceReport {
         let cases = std_stream_cases();
         let mut report = ConformanceReport::default();
@@ -643,7 +762,61 @@ mod tests {
             "mock adapter failed streaming cases: {:?}",
             report.failed_cases
         );
-        assert_eq!(report.passed, 4);
+        assert_eq!(report.passed, 5);
         assert_eq!(report.failed, 0);
+    }
+
+    #[test]
+    fn mock_adapter_describe_capabilities_is_well_formed() {
+        // Phase 3 conformance check:
+        // every `LlmV1` adapter must
+        // implement
+        // `describe_capabilities` as a
+        // synchronous function that
+        // returns a
+        // `ModelCapabilities` card with
+        // sensible values. The mock
+        // returns a 200k-token,
+        // vision-capable, tool-capable
+        // card. The check is:
+        //   1. The card is
+        //      non-empty
+        //      (max_context_tokens > 0).
+        //   2. The card is stable:
+        //      calling
+        //      `describe_capabilities`
+        //      twice returns the same
+        //      card (no mutation).
+        //   3. The call is sync
+        //      (not async, no `.await`).
+        // The `CapabilityRegistry`
+        // calls this once per request
+        // to filter "does this adapter
+        // support tools / vision /
+        // X-token context?" — a slow
+        // or non-pure implementation
+        // would make the registry a
+        // hot, slow path.
+        let mock = MockAdapter::new();
+        let card1 = mock.describe_capabilities();
+        // (1) Well-formed.
+        assert!(
+            card1.max_context_tokens > 0,
+            "describe_capabilities card.max_context_tokens must be > 0"
+        );
+        // (2) Stable.
+        let card2 = mock.describe_capabilities();
+        assert_eq!(
+            card1, card2,
+            "describe_capabilities must return the same card on every call (no mutation)"
+        );
+        // (3) Sync — the test is
+        // #[test], not
+        // #[tokio::test], and
+        // there's no `.await` on
+        // the call. If a future
+        // change made it async,
+        // this test would fail to
+        // compile.
     }
 }

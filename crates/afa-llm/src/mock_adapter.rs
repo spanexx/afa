@@ -231,11 +231,14 @@ impl LlmV1 for MockAdapter {
     ) -> Result<CompletionStream, LlmErrorV1> {
         // The mock's stream is a 3-chunk reply
         // (`text` + `Finished`) for the success
-        // cases, or a 1-chunk reply
-        // (`Error(...)`) for the failure cases.
-        // The mpsc channel has capacity 4 (just
-        // enough for the 3-chunk case; the
-        // `send().await` would only block on
+        // cases, a 4-chunk reply (id+name
+        // `ToolCallDelta` + 2-arg `ToolCallDelta`
+        // + `Finished { ToolCalls }`) for the
+        // tool-call success case, or a 1-chunk
+        // reply (`Error(...)`) for the failure
+        // cases. The mpsc channel has capacity 4
+        // (just enough for the tool-call case;
+        // the `send().await` would only block on
         // additional capacity, which the suite
         // never needs).
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -253,14 +256,41 @@ impl LlmV1 for MockAdapter {
                     })
                     .await;
             }
-            Ok(CompletionResponse::ToolCalls { .. }) => {
+            Ok(CompletionResponse::ToolCalls { calls, usage }) => {
+                // Phase 3: emit a 3-chunk tool-call
+                // stream so the streaming
+                // conformance suite can assert on
+                // the same shape the real adapters
+                // produce:
+                //   1. `ToolCallDelta { id, name_delta, "" }`
+                //      — the first chunk carries
+                //      the call id + the tool's
+                //      name.
+                //   2. `ToolCallDelta { "", "", arguments_delta }`
+                //      — the second chunk carries
+                //      the arguments JSON string.
+                //   3. `Finished { reason: ToolCalls, usage }`
+                //      — the terminal chunk.
+                if let Some(first) = calls.first() {
+                    let _ = tx
+                        .send(CompletionChunk::ToolCallDelta {
+                            id: first.id.clone(),
+                            name_delta: first.name.clone(),
+                            arguments_delta: String::new(),
+                        })
+                        .await;
+                    let _ = tx
+                        .send(CompletionChunk::ToolCallDelta {
+                            id: String::new(),
+                            name_delta: String::new(),
+                            arguments_delta: first.arguments.to_string(),
+                        })
+                        .await;
+                }
                 let _ = tx
                     .send(CompletionChunk::Finished {
                         reason: afa_contracts::FinishReason::ToolCalls,
-                        usage: Usage {
-                            prompt_tokens: 20,
-                            completion_tokens: 8,
-                        },
+                        usage,
                     })
                     .await;
             }
@@ -363,5 +393,61 @@ mod tests {
         assert!(
             matches!(&chunks[1], CompletionChunk::Finished { reason, .. } if *reason == afa_contracts::FinishReason::Stop)
         );
+    }
+
+    #[tokio::test]
+    async fn stream_complete_emits_tool_call_deltas_then_finished() {
+        // Phase 3: the mock's tool-call
+        // stream is a 3-item
+        // `mpsc::Receiver<CompletionChunk>`:
+        //   1. `ToolCallDelta { id, name, "" }`
+        //      — id + name.
+        //   2. `ToolCallDelta { "", "", arguments_delta }`
+        //      — the arguments JSON string.
+        //   3. `Finished { reason: ToolCalls, usage }`.
+        let req = MockAdapter::request_for_tool_call("x");
+        let adapter = MockAdapter;
+        let mut stream = adapter
+            .stream_complete(req, &ctx())
+            .await
+            .expect("stream should be Ok");
+        let mut chunks: Vec<CompletionChunk> = Vec::new();
+        while let Some(c) = stream.recv().await {
+            chunks.push(c);
+        }
+        assert_eq!(chunks.len(), 3);
+        match &chunks[0] {
+            CompletionChunk::ToolCallDelta {
+                id,
+                name_delta,
+                arguments_delta,
+            } => {
+                assert_eq!(id, "call_mock_1");
+                assert_eq!(name_delta, "search_listings");
+                assert_eq!(arguments_delta, "");
+            }
+            other => panic!("expected first chunk to be ToolCallDelta(id+name); got {other:?}"),
+        }
+        match &chunks[1] {
+            CompletionChunk::ToolCallDelta {
+                id,
+                name_delta,
+                arguments_delta,
+            } => {
+                assert_eq!(id, "");
+                assert_eq!(name_delta, "");
+                assert!(
+                    arguments_delta.contains("Warsaw"),
+                    "arguments_delta should contain the canned args; got {arguments_delta:?}"
+                );
+            }
+            other => panic!("expected second chunk to be ToolCallDelta(args); got {other:?}"),
+        }
+        match &chunks[2] {
+            CompletionChunk::Finished { reason, .. } => {
+                assert_eq!(*reason, afa_contracts::FinishReason::ToolCalls);
+            }
+            other => panic!("expected third chunk to be Finished {{ ToolCalls }}; got {other:?}"),
+        }
     }
 }

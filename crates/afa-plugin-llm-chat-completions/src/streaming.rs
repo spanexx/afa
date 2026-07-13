@@ -445,6 +445,40 @@ fn map_chat_completions_sse_event(parsed: &Value, model: &str) -> Option<Complet
         }
         return Some(CompletionChunk::TextDelta(text.to_string()));
     }
+    // Non-terminal tool-call
+    // chunk. The Chat Completions
+    // wire format sends one
+    // `delta.tool_calls` array per
+    // chunk; for v1 we collapse
+    // to the first item (multiple
+    // parallel tool calls is a
+    // future LlmV1 v2 concern;
+    // see IMPL §5 streaming
+    // notes). The first chunk
+    // for a given call carries
+    // `id` + `function.name`; the
+    // rest carry only
+    // `function.arguments` (the
+    // JSON string is streamed
+    // piece by piece).
+    if let Some(tool_calls) = choice["delta"]["tool_calls"].as_array() {
+        if let Some(first) = tool_calls.first() {
+            let id = first["id"].as_str().unwrap_or("").to_string();
+            let name_delta = first["function"]["name"].as_str().unwrap_or("").to_string();
+            let arguments_delta = first["function"]["arguments"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            if id.is_empty() && name_delta.is_empty() && arguments_delta.is_empty() {
+                return None;
+            }
+            return Some(CompletionChunk::ToolCallDelta {
+                id,
+                name_delta,
+                arguments_delta,
+            });
+        }
+    }
     None
 }
 

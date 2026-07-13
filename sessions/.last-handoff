@@ -1,171 +1,232 @@
-# Handoff — 2026-07-13 (Session 4, Pack #4)
+# Handoff — 2026-07-13 (Session 5, Pack #4 Phase 3)
 
 ## Resume point
-Wire-format rename of the two LLM adapter crates is **code-complete, all
-4 validation gates green, working tree staged for commit**. The user
-wanted the misleading vendor name "OpenAiAdapter" / "afa-plugin-llm-
-openai-compat" purged in favour of the actual protocol name (Responses
-API for the new wire format, Chat Completions for the older wire
-format). The rename is split into two atomic commits worth of work
-(Phase 2 streaming + Phase 2.5 wire-format rename) but the user wants
-a single commit.
+**Phase 3 (Tool calls + `describe_capabilities` caching) is
+code-complete and all 4 validation gates green** (`cargo fmt
+--check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace`, `cargo doc --workspace --no-deps`).
+**Test count: 223 passing, 0 failing across 31 test binaries**
+(up from 218 in Phase 2). **+5 new tests** in this session.
 
-## What's done
+The user asked to **ingest**
+`sessions/Continue LLM Engine Session-phase-3.md` and continue
+Phase 3. The session log showed 2/8 of the Phase 3 todo list done
+in the previous session (streaming tool-call mapper changes in
+both crates), and 6/8 remaining: integration tests (×2),
+describe_capabilities caching test (×1), IMPL doc update, full
+make, handoff.
 
-- `crates/afa-plugin-llm-openai-compat/` → `crates/afa-plugin-llm-chat-
-  completions/` (12 file renames: 1 Cargo.toml + 4 examples + 4 src +
-  3 tests, all tracked by git as `R`).
-- `crates/afa-plugin-llm-http/src/openai_adapter.rs` →
-  `crates/afa-plugin-llm-http/src/responses_adapter.rs` (1 file rename).
-- Type renames in `afa-plugin-llm-http`:
-  - `OpenAiAdapter` → `ResponsesAdapter`
-  - `OpenAiConfig` → `ResponsesConfig`
-  - `OPENAI_PROD_BASE_URL` → `OPENAI_RESPONSES_BASE_URL`
-  - `map_request_to_openai` → `map_request_to_responses`
-  - preset `gpt_4o` → `responses_gpt_4o` / `responses_gpt_4o_with_base_url`
-  - module path `super::openai_adapter::` → `super::responses_adapter::`
-  - tracing message "openai adapter recovered after 401" → "responses
-    adapter recovered after 401"
-  - All CID header comments + module doc-block stories rewritten to
-    refer to "OpenAI Responses-API specialist" (accurate description,
-    not a vendor tag)
-- Type renames in `afa-plugin-llm-chat-completions`:
-  - `OPENAI_CHAT_PROD_BASE_URL` → `OPENAI_CHAT_COMPLETIONS_BASE_URL`
-  - default `provider_name` `"openai-prod"` → `"chat-completions-prod"`
-  - example `SecretRef.name` `"openai-prod-key"` → `"chat-completions-
-    prod-key"` (test fixtures)
-  - test `SecretRef.name` `"openai-compat-test-key"` → `"chat-
-    completions-test-key"` (test fixtures)
-- Cross-crate sweep: `afa-contracts::llm::capabilities` (doc comment),
-  `afa-llm::tests::llm_v1` (doc comment), `afa-llm::conformance` (the
-  rename touched audit-event key names too).
-- `Cargo.lock` regenerated (the renamed crate changed path in the
-  workspace member hash).
-- `cargo fmt --all` applied (the rename produced 3 long-line
-  diagnostics that fmt cleaned up).
-- `docs/features/llm-engine-baseline/{PRD,TRD,FLOW,IMPL}.md` updated
-  to reflect the new crate + type names. (Docs live in
-  `../docs/`, outside the `afa/` git repo, so the doc edits are NOT
-  staged — they are local-only and the next commit on the docs
-  branch can pick them up.)
+## What this session delivered
 
-## What's NOT done (intentional, out of scope)
+### Code (8 files modified)
+1. `crates/afa-plugin-llm-http/src/streaming.rs` — carried
+   over from Session 4 (function_call tracker for
+   `response.output_item.added` + `response.function_call_arguments.delta`).
+2. `crates/afa-plugin-llm-chat-completions/src/streaming.rs`
+   — carried over from Session 4 (`delta.tool_calls[0]`
+   non-terminal handling).
+3. `crates/afa-plugin-llm-http/tests/adapter_streaming.rs` —
+   new `flow_4_streamed_tool_call_yields_deltas_then_finished_tool_calls`
+   wiremock-rs test (1).
+4. `crates/afa-plugin-llm-chat-completions/tests/adapter_streaming.rs`
+   — new `flow_4_streamed_tool_call_yields_deltas_then_finished_tool_calls`
+   wiremock-rs test (1).
+5. `crates/afa-plugin-llm-http/tests/adapter_integration.rs` —
+   new `CountingFakeSecurity` (mock with unseal call counter) +
+   new `describe_capabilities_does_not_touch_security` test
+   that asserts the unseal counter is 0 across two
+   consecutive calls (1).
+6. `crates/afa-llm/src/conformance.rs` — new
+   `stream_tool_call` streaming conformance case (asserts the
+   3-chunk tool-call stream shape against the `MockAdapter`);
+   new `mock_adapter_describe_capabilities_is_well_formed`
+   `#[test]` (asserts the card is well-formed, stable, and
+   sync); 4→5 cases in `std_stream_cases`.
+7. `crates/afa-llm/src/mock_adapter.rs` —
+   `stream_complete` now emits a 3-chunk tool-call stream
+   (id+name `ToolCallDelta` + args `ToolCallDelta` +
+   `Finished { ToolCalls }`) for the `tool_call_basic`
+   case; new `stream_complete_emits_tool_call_deltas_then_finished`
+   `#[cfg(test)]` unit test.
+8. `crates/afa-plugin-llm-chat-completions/src/adapter.rs` —
+   **bug fix**: streaming now sets `stream_options:
+   { include_usage: true }` on the request body. Without it
+   the terminal SSE chunk carries `usage: null` and the
+   adapter reports zero usage. This is a real wire contract
+   most OpenAI-compatible vendors (Groq, Cerebras, Ollama,
+   vLLM, llama.cpp, freellmapi) copy.
 
-- The `async-openai = "0.29"` dep is still in
-  `crates/afa-plugin-llm-http/Cargo.toml` line 13. Per project
-  memory, this is a leftover Phase 1 dependency scheduled for
-  removal in Phase 3 cleanup. It is not used by any `use` in the
-  crate (raw `reqwest` does the transport). Dropping it now would
-  mix the wire-format rename with a dep-removal cleanup; the user
-  asked for the rename only. Note for Phase 3.
-- The session logs (`sessions/llm-engine-*.md`) and
-  `sessions/.last-handoff` still reference the old names. Per the
-  `log-prompt` skill rule "append only — never rewrite earlier
-  entries", those are frozen historical records. Future agents
-  should read the new commit message and the new handoff for the
-  current names.
+### Docs (4 files updated)
+- `docs/features/llm-engine-baseline/PRD-llm-engine-baseline.md`:
+  Phase 3 status = DONE, Phase 3/4 AC items: Flow 4 (tool
+  calls) checked.
+- `docs/features/llm-engine-baseline/TRD-llm-engine-baseline.md`:
+  Implementation status block added.
+- `docs/features/llm-engine-baseline/FLOW-llm-engine-baseline.md`:
+  Implementation status block added; Flow 4 QA checklist
+  items all checked.
+- `docs/features/llm-engine-baseline/IMPL-llm-engine-baseline.md`:
+  Phase 3 status = DONE; Phase 3 tasks all `[x]` (plus two
+  new ones for the Chat Completions mirror + the
+  `stream_options: { include_usage: true }` bug fix); new
+  §5 "Design locks (Phase 3 multi-turn tool-call flow)"
+  subsection that locks:
+    1. Multi-turn tool-call flow is "fold into `complete()`
+       (stateless, Claude pattern)" — the engine has no
+       session state, the workflow carries the conversation
+       history in the `CompletionRequest`.
+    2. `describe_capabilities` is sync, no `async`, no
+       `ctx`, no I/O, no `security.unseal`.
+    3. The streaming tool-call contract:
+       `ToolCallDelta { id, name_delta, arguments_delta }` +
+       `Finished { reason: ToolCalls, ... }`. The
+       `Finished.reason: ToolCalls` is **inferred** from the
+       function_call output item for the OpenAI Responses
+       API (the wire does not carry an explicit
+       `finish_reason`); for the OpenAI Chat Completions API
+       it is sent explicitly as `finish_reason: "tool_calls"`
+       and maps 1:1.
 
-## Validation gate state
+## Key design decisions locked in this session
+
+1. **Multi-turn tool-call flow is stateless at engine
+   level.** The `LlmV1` trait has no `session_id`, no
+   `register_assistant_message()`, no `next_turn()`. The
+   workflow carries the conversation history in every
+   `CompletionRequest`. This is the Claude pattern.
+2. **`describe_capabilities` is sync.** A future Phase 5+
+   test that adds `.await` to it will fail to compile.
+3. **The Chat Completions adapter collapses
+   `delta.tool_calls[0]` to the first item** (parallel
+   tool calls is a future LlmV1 v2 concern). Subsequent
+   arguments-delta chunks have empty `id` (the wire
+   format does NOT repeat the id on arguments-only
+   chunks) and empty `name_delta`; the consumer
+   remembers the id from the first chunk and reassembles.
+4. **The OpenAI Responses adapter infers
+   `Finished.reason: ToolCalls`** from the presence of a
+   `function_call` output item in `response.completed`,
+   even though the wire does not carry an explicit
+   `finish_reason`.
+5. **`stream_options: { include_usage: true }` is a real
+   wire contract** for the OpenAI Chat Completions API.
+   Without it, `usage` is always null in streaming. The
+   bug fix in this session was a regression caught by the
+   new Flow 4 test (the test asserted
+   `completion_tokens: 18` and the first run returned 0;
+   the new code is the cause + the fix).
+
+## What is still open
+
+- **Phase 4 (Integration + final CI + documentation)** is
+  NOT STARTED. The IMPL doc keeps the Phase 4 task list
+  intact (boots a real `Kernel` with a real
+  `ResponsesAdapter` pointed at wiremock-rs; runs the full
+  end-to-end round-trip; Flow 11 multi-turn stateless
+  test).
+- **Working tree is dirty** (8 files modified, 0 staged).
+  The user has not committed. Suggested commit message at
+  the bottom of this handoff.
+- **Docs are not committed** (the docs/ tree is a separate
+  git repo or uncommitted; verify with `git -C
+  /home/spanexx/Shared/agents status`).
+
+## Skills the next agent will likely need
+
+- `situation-awareness` — to re-establish context after
+  the user's manual commit.
+- `grill-with-docs` — if a Phase 4 question pops up that
+  is not already covered by the IMPL/PRD/FLOW/TRD docs.
+- `feature-pipeline-review` — to validate the Phase 3
+  implementation matches the IMPL doc (it does; we
+  cross-checked the 8 IMPL tasks before stopping).
+- `handoff` — to compact at the end of the next session.
+
+## Suggested commit message (for the user's manual commit)
 
 ```
-$ make
-cargo fmt --all -- --check                  [PASS]
-cargo clippy --workspace --all-targets
-  -- -D warnings                             [PASS]
-cargo test --workspace                      [PASS — 218/218]
-cargo doc --workspace --no-deps             [PASS]
+feat(llm): Phase 3 — tool calls + describe_capabilities
+
+Pack #4 (LLM Integration) Phase 3 lands. Both
+afa-plugin-llm-http (OpenAI Responses) and
+afa-plugin-llm-chat-completions (Chat Completions)
+now map streaming tool calls to the
+CompletionChunk::ToolCallDelta +
+Finished { reason: ToolCalls } contract.
+
+afa-plugin-llm-http:
+  * streaming.rs: track `function_call` output items
+    via `response.output_item.added`; emit
+    `ToolCallDelta { id, name_delta, "" }` on the
+    first event and `ToolCallDelta { id, "",
+    arguments_delta }` on each subsequent
+    `response.function_call_arguments.delta`;
+    infer `Finished.reason: ToolCalls` from the
+    function_call presence.
+  * tests/adapter_streaming.rs: new
+    `flow_4_streamed_tool_call_*` wiremock-rs test
+    (5 SSE events → 1 ToolCallDelta + 3 args-delta
+    + Finished).
+  * tests/adapter_integration.rs: new
+    `CountingFakeSecurity` + new
+    `describe_capabilities_does_not_touch_security`
+    test (asserts the unseal counter is 0 across
+    two consecutive calls).
+
+afa-plugin-llm-chat-completions:
+  * streaming.rs: collapse
+    `delta.tool_calls[0]` to the first item;
+    emit the same ToolCallDelta shape.
+  * adapter.rs: BUG FIX — streaming now sets
+    `stream_options: { include_usage: true }` on
+    the request body. Without it the terminal SSE
+    chunk carries `usage: null` and the adapter
+    reports zero usage (a real wire contract
+    most OpenAI-compatible vendors copy).
+  * tests/adapter_streaming.rs: new
+    `flow_4_streamed_tool_call_*` wiremock-rs test
+    (6 SSE events → 1 role-establishing + 1
+    id+name ToolCallDelta + 3 args-delta +
+    Finished).
+
+afa-llm:
+  * src/conformance.rs: new `stream_tool_call`
+    streaming conformance case (5th case; locks
+    the 3-chunk tool-call stream shape);
+    new `mock_adapter_describe_capabilities_is_well_formed`
+    test (asserts the card is well-formed, stable,
+    and sync).
+  * src/mock_adapter.rs: stream_complete now
+    emits a 3-chunk tool-call stream for
+    `tool_call_basic`; new
+    `stream_complete_emits_tool_call_deltas_then_finished`
+    unit test.
+
+docs/features/llm-engine-baseline/{PRD,TRD,FLOW,IMPL}.md:
+  * Phase 3 status = DONE in all four.
+  * IMPL §3 Phase 3 tasks all [x] (added two
+    new tasks: the Chat Completions mirror and
+    the stream_options bug fix).
+  * IMPL §5 new "Design locks (Phase 3
+    multi-turn tool-call flow)" subsection that
+    locks: (a) the fold-into-complete pattern
+    is the caller's job, not the engine's;
+    (b) describe_capabilities is sync, no
+    async, no ctx, no I/O, no security.unseal;
+    (c) the streaming tool-call contract.
+  * FLOW Flow 4 QA checklist items all checked.
+
+Test count: 223 passing, 0 failing across 31
+test binaries (up from 218 in Phase 2; +5 new
+tests in this phase).
 ```
 
-## Git state
+## Files to read first when resuming
 
-- 26 files staged (`M`, `A`, `R`), 0 unstaged, 0 untracked.
-- 2784 insertions, 237 deletions.
-- Branch: `main`. Last commit: `c4d0922 feat(afa-plugin-llm-openai-
-  compat): add three new live-vendor smoke examples` (the previous
-  session's "vendor quirks" commit).
-- The session log `/home/spanexx/Shared/agents/sessions/llm-engine-
-  continue-3.md` describes the "Full wire-format rename" plan the
-  user authorized mid-session; this handoff is the implementation
-  of that plan.
-
-## Suggested commit message (for the user to run manually)
-
-```
-refactor(llm): rename LLM adapter crates + types to wire-format-neutral names
-
-The vendor name "OpenAI" was leaking into the type names, module
-names, and constant names of both LLM adapter crates, making the
-codebase feel married to one vendor and obscuring the actual
-protocol each crate implements. This commit renames the public
-surface of the LLM plugin crates to the wire format each one
-talks, not the vendor that originated the format.
-
-afa-plugin-llm-openai-compat -> afa-plugin-llm-chat-completions
-  (the older /chat/completions wire format, supported by every
-  OpenAI-compatible vendor: Groq, Cerebras, Ollama /v1, LM
-  Studio, llama.cpp, vLLM, freellmapi, etc.)
-afa-plugin-llm-http (unchanged crate name — already vendor-neutral;
-  it targets the OpenAI Responses API by design)
-  src/openai_adapter.rs -> src/responses_adapter.rs
-  struct OpenAiAdapter   -> struct ResponsesAdapter
-  struct OpenAiConfig    -> struct ResponsesConfig
-  const OPENAI_PROD_BASE_URL -> const OPENAI_RESPONSES_BASE_URL
-  fn   map_request_to_openai -> fn   map_request_to_responses
-  preset gpt_4o          -> preset responses_gpt_4o
-
-afa-plugin-llm-chat-completions (the renamed compat crate):
-  const OPENAI_CHAT_PROD_BASE_URL -> const OPENAI_CHAT_COMPLETIONS_BASE_URL
-  default provider_name  "openai-prod" -> "chat-completions-prod"
-  test SecretRef.name    "openai-prod-key" -> "chat-completions-prod-key"
-  test SecretRef.name    "openai-compat-test-key" -> "chat-completions-test-key"
-
-The "OpenAI" name is preserved in:
-- doc-block story-telling comments that describe the protocol
-  ("OpenAI Responses API", "OpenAI Chat Completions API") — these
-  are accurate descriptions of the wire format, not misleading
-  type names
-- the test key_name "openai-prod-key" in the http crate, which
-  literally represents the OpenAI production key the operator
-  pre-seals (this crate talks to OpenAI only; the chat-completions
-  crate talks to any compatible vendor so the provider_name was
-  misleading there)
-- the `afa-contracts::llm::capabilities` doc-comment example, which
-  now uses ResponsesConfig
-- the `afa-llm::tests::llm_v1` doc-comment example, which now
-  mentions ResponsesAdapter as the concrete adapter
-
-Validation: 218/218 tests pass, clippy clean, doc builds.
-
-Phase 2 work (streaming.rs + adapter_streaming.rs in both sibling
-crates, conformance.rs in afa-llm) is included in this commit —
-it was the unstaged follow-up from the previous session. The two
-phases are atomic w.r.t. each other (Phase 2 imports Phase 1.5/2
-types).
-
-Follow-up: async-openai = "0.29" is still in
-afa-plugin-llm-http/Cargo.toml. It is unused (raw reqwest does
-the transport). Drop in Phase 3 cleanup.
-```
-
-The user executes the commit manually per project memory.
-
-## Next step (Phase 3) preview
-
-Phase 3 = tool calls + describe_capabilities caching. Tracked in
-IMPL-llm-engine-baseline.md §5 (NOT STARTED). When the user is
-ready, this handoff becomes the resume point — the agent should:
-
-1. Read `docs/features/llm-engine-baseline/IMPL-llm-engine-baseline.md`
-   §5 in full before planning.
-2. Decide whether tool calls go in `afa-contracts::llm` (the
-   type-only crate) or in a new helper crate. Per the
-   "sibling-crate" pattern, a new helper would be the
-   `afa-llm-internal` crate that absorbs the `key_wiring.rs`
-   duplication noted in project memory.
-3. Drop the `async-openai` dep as part of Phase 3 (or earlier, as
-   a separate cleanup commit if the user prefers).
-4. The `afa-plugin-llm-claude` adapter (also in the backlog)
-   becomes a copy-paste of `afa-plugin-llm-http` with a
-   different wire format and a different `key_wiring` (Anthropic
-   uses a different auth header — `x-api-key` + `anthropic-version`
-   instead of `Authorization: Bearer`).
+- [IMPL-llm-engine-baseline.md](file:///home/spanexx/Shared/agents/docs/features/llm-engine-baseline/IMPL-llm-engine-baseline.md) (Phase 3 + §5 design locks)
+- [FLOW-llm-engine-baseline.md](file:///home/spanexx/Shared/agents/docs/features/llm-engine-baseline/FLOW-llm-engine-baseline.md) (Flow 4 + Flow 11)
+- [PRD-llm-engine-baseline.md](file:///home/spanexx/Shared/agents/docs/features/llm-engine-baseline/PRD-llm-engine-baseline.md) (Phase 3/4 AC items)
+- `crates/afa-llm/src/conformance.rs` (the 5 streaming conformance cases)
+- `crates/afa-plugin-llm-http/src/streaming.rs` (the function_call tracker)
+- `crates/afa-plugin-llm-chat-completions/src/streaming.rs` (the delta.tool_calls[0] collapse)
+- `crates/afa-plugin-llm-chat-completions/src/adapter.rs` (the stream_options bug fix)

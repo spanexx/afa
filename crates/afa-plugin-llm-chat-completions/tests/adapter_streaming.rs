@@ -21,6 +21,20 @@
 //!   mid-stream. The bg task sends an
 //!   `Error(StreamInterrupted)` chunk and a
 //!   `CompletionFailed` event.
+//! - `flow_4_streamed_tool_call_yields_deltas_then_finished_tool_calls`:
+//!   Phase 3. The wiremock server returns a
+//!   sequence of Chat Completions SSE events:
+//!   the role-establishing chunk, then a
+//!   `delta.tool_calls[0]` chunk with id and
+//!   name, then three `delta.tool_calls[0]`
+//!   chunks carrying the arguments string in
+//!   three pieces, then a terminal
+//!   `finish_reason: "tool_calls"` chunk. The
+//!   adapter yields one `ToolCallDelta { id,
+//!   name_delta, "" }` and three
+//!   `ToolCallDelta { id, "", arguments_delta }`
+//!   chunks and a terminal `Finished { reason:
+//!   ToolCalls, ... }` chunk.
 //!
 //! Story (plain English): Same as the OpenAI
 //! Responses streaming tests — the "Lend Your Voice"
@@ -34,6 +48,7 @@
 //! CID:afa-plugin-llm-chat-completions-streaming-integration-002 -> flow_5_caller_drop
 //! CID:afa-plugin-llm-chat-completions-streaming-integration-003 -> flow_6_deadline
 //! CID:afa-plugin-llm-chat-completions-streaming-integration-004 -> flow_10_stream_interrupted
+//! CID:afa-plugin-llm-chat-completions-streaming-integration-005 -> flow_4_streamed_tool_call
 //!
 //! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-streaming-integration-" crates/afa-plugin-llm-chat-completions/tests/adapter_streaming.rs
 
@@ -397,6 +412,200 @@ async fn flow_10_stream_interrupted_publishes_error_chunk_and_failed_event() {
         "CompletionFailed must carry StreamInterrupted, got {:?}",
         failed_evt.error
     );
+}
+
+// ---------------------------------------------------------------------------
+// Flow 4 — streamed tool call (Phase 3)
+// ---------------------------------------------------------------------------
+
+/// A canned OpenAI Chat Completions
+/// API SSE stream for a tool call:
+/// the role-establishing chunk
+/// (skipped by the adapter) + a
+/// `delta.tool_calls[0]` chunk with
+/// `id` + `function.name` + three
+/// `delta.tool_calls[0]` chunks
+/// carrying the JSON arguments
+/// string in three pieces + a
+/// terminal `finish_reason:
+/// "tool_calls"` chunk + `[DONE]`.
+/// The wire shape is exactly what
+/// the OpenAI Chat Completions API
+/// sends (and what every
+/// OpenAI-compatible vendor —
+/// Groq, Cerebras, Ollama /v1, LM
+/// Studio, llama.cpp, vLLM,
+/// freellmapi — copies).
+const TOOL_CALL_SSE_BODY: &str = "\
+data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}
+
+data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_test_1\",\"type\":\"function\",\"function\":{\"name\":\"search_listings\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}
+
+data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"query\\\":\"}}]},\"finish_reason\":null}]}
+
+data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"Warsaw\\\"\"}}]},\"finish_reason\":null}]}
+
+data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"}\"}}]},\"finish_reason\":null}]}
+
+data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,\"model\":\"gpt-4o-mini\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":18,\"total_tokens\":60}}
+
+data: [DONE]
+";
+
+#[tokio::test]
+async fn flow_4_streamed_tool_call_yields_deltas_then_finished_tool_calls() {
+    // The wiremock-rs server
+    // returns the canned
+    // `TOOL_CALL_SSE_BODY` for
+    // any POST to
+    // `/chat/completions`. The
+    // adapter must yield:
+    //   1. `ToolCallDelta { id:
+    //      "call_test_1",
+    //      name_delta:
+    //      "search_listings",
+    //      arguments_delta: "" }`
+    //      (from the first
+    //      `delta.tool_calls[0]`
+    //      chunk, which carries
+    //      the id + name).
+    //   2-4. `ToolCallDelta { id:
+    //      "", name_delta: "",
+    //      arguments_delta: ... }`
+    //      (the wire format
+    //      does NOT repeat the
+    //      `id` on subsequent
+    //      chunks for a single
+    //      tool call stream; the
+    //      consumer must remember
+    //      the id from the first
+    //      chunk and append the
+    //      arguments to the call
+    //      it owns — see
+    //      `map_chat_completions_sse_event`).
+    //   5. `Finished { reason:
+    //      ToolCalls, usage: { 42,
+    //      18 } }` (the
+    //      `finish_reason:
+    //      "tool_calls"` from the
+    //      terminal chunk maps
+    //      to `FinishReason::ToolCalls`).
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(TOOL_CALL_SSE_BODY),
+        )
+        .mount(&server)
+        .await;
+    let (bus, adapter, ctx) = build_adapter(&server.uri());
+    let mut comp_sub = bus.subscribe::<CompletionCompleted>(16);
+
+    let mut stream = adapter
+        .stream_complete(text_request(), &ctx)
+        .await
+        .expect("stream_complete should return Ok");
+
+    // The first
+    // `delta.tool_calls[0]`
+    // chunk carries the id +
+    // name.
+    let c1 = recv_chunk(&mut stream).await;
+    match &c1 {
+        CompletionChunk::ToolCallDelta {
+            id,
+            name_delta,
+            arguments_delta,
+        } => {
+            assert_eq!(id, "call_test_1");
+            assert_eq!(name_delta, "search_listings");
+            assert_eq!(arguments_delta, "");
+        }
+        other => panic!("expected first tool-call chunk to carry id+name; got {other:?}"),
+    }
+    // Three arguments-delta
+    // chunks (the JSON
+    // arguments string is
+    // split into three
+    // pieces). The wire does
+    // NOT repeat the id; the
+    // consumer remembers it
+    // from c1 and appends
+    // these pieces to the
+    // call it owns.
+    let c2 = recv_chunk(&mut stream).await;
+    let c3 = recv_chunk(&mut stream).await;
+    let c4 = recv_chunk(&mut stream).await;
+    match (&c2, &c3, &c4) {
+        (
+            CompletionChunk::ToolCallDelta {
+                id: id2,
+                name_delta: n2,
+                arguments_delta: a2,
+            },
+            CompletionChunk::ToolCallDelta {
+                id: id3,
+                name_delta: n3,
+                arguments_delta: a3,
+            },
+            CompletionChunk::ToolCallDelta {
+                id: id4,
+                name_delta: n4,
+                arguments_delta: a4,
+            },
+        ) => {
+            // Subsequent chunks have
+            // empty `id` (the wire
+            // doesn't repeat it) and
+            // empty `name_delta` (the
+            // name was sent once in
+            // c1).
+            assert_eq!(id2, "");
+            assert_eq!(n2, "");
+            assert_eq!(a2, "{\"query\":");
+            assert_eq!(id3, "");
+            assert_eq!(n3, "");
+            assert_eq!(a3, "\"Warsaw\"");
+            assert_eq!(id4, "");
+            assert_eq!(n4, "");
+            assert_eq!(a4, "}");
+        }
+        other => panic!("expected 3 args-delta chunks; got {other:?}"),
+    }
+    // The terminal chunk is
+    // `Finished { reason: ToolCalls }`.
+    let c5 = recv_chunk(&mut stream).await;
+    match c5 {
+        CompletionChunk::Finished { reason, usage } => {
+            assert_eq!(
+                reason,
+                FinishReason::ToolCalls,
+                "Finished.reason must be ToolCalls (mapped from finish_reason: tool_calls)"
+            );
+            assert_eq!(usage.prompt_tokens, 42);
+            assert_eq!(usage.completion_tokens, 18);
+        }
+        other => panic!("expected terminal Finished; got {other:?}"),
+    }
+    // Channel closed.
+    let end = tokio::time::timeout(Duration::from_secs(2), stream.recv())
+        .await
+        .expect("channel close timeout");
+    assert!(end.is_none(), "channel should be closed after Finished");
+
+    // The bus saw a
+    // `CompletionCompleted` with
+    // `finish_reason: ToolCalls`.
+    let (comp_evt, _) = recv_event(&mut comp_sub).await;
+    assert_eq!(
+        comp_evt.finish_reason,
+        FinishReason::ToolCalls,
+        "CompletionCompleted.finish_reason must be ToolCalls"
+    );
+    assert_eq!(comp_evt.prompt_tokens, 42);
+    assert_eq!(comp_evt.completion_tokens, 18);
 }
 
 // ---------------------------------------------------------------------------

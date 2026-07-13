@@ -32,6 +32,16 @@
 //!   `Option<CompletionChunk>`. `None` for events
 //!   the adapter does not care about (e.g.
 //!   `response.created`, `response.output_text.done`).
+//!   Takes a `&mut has_function_call` flag the bg
+//!   task maintains; the mapper sets it to `true`
+//!   when it sees a
+//!   `response.output_item.added` event for a
+//!   `function_call` output item, and the
+//!   `response.completed` handler uses it to pick
+//!   `FinishReason::ToolCalls` instead of `Stop`
+//!   (the Responses API does NOT send an
+//!   explicit `finish_reason` in
+//!   `response.completed`).
 //!
 //! Story (plain English): When a workflow asks
 //! for a streamed completion, the OpenAI
@@ -207,6 +217,22 @@ impl StreamBg {
 
         // Step 2: iterate the SSE stream.
         let mut stream = resp.bytes_stream().eventsource();
+        // Track whether any function_call
+        // output item was added during the
+        // stream. The OpenAI Responses API
+        // does NOT send an explicit
+        // `finish_reason` in
+        // `response.completed` — the
+        // consumer infers it from the
+        // output items. If any
+        // function_call was added, the
+        // model stopped because it wanted
+        // to call a tool, and the
+        // `Finished` chunk's reason is
+        // `ToolCalls`; otherwise it's
+        // `Stop` (or `MaxTokens` if the
+        // response was truncated).
+        let mut has_function_call = false;
         while let Some(event_result) = stream.next().await {
             let event = match event_result {
                 Ok(e) => e,
@@ -232,7 +258,9 @@ impl StreamBg {
                 Ok(v) => v,
                 Err(_) => continue,
             };
-            let Some(chunk) = map_responses_sse_event(&parsed, &self.config.model) else {
+            let Some(chunk) =
+                map_responses_sse_event(&parsed, &self.config.model, &mut has_function_call)
+            else {
                 continue;
             };
             // If the chunk is a
@@ -412,7 +440,11 @@ impl StreamBg {
 // rest. See the IMPL doc's
 // Streaming Events Table for the full
 // taxonomy.
-fn map_responses_sse_event(parsed: &Value, model: &str) -> Option<CompletionChunk> {
+fn map_responses_sse_event(
+    parsed: &Value,
+    model: &str,
+    has_function_call: &mut bool,
+) -> Option<CompletionChunk> {
     let event_type = parsed["type"].as_str().unwrap_or("");
     match event_type {
         "response.output_text.delta" => {
@@ -421,6 +453,54 @@ fn map_responses_sse_event(parsed: &Value, model: &str) -> Option<CompletionChun
                 None
             } else {
                 Some(CompletionChunk::TextDelta(delta))
+            }
+        }
+        // `response.output_item.added` fires
+        // once per output item as the
+        // response builds. When the item
+        // is a `function_call`, we emit the
+        // first `ToolCallDelta` (id +
+        // name) and remember the call so
+        // the terminal `Finished` chunk
+        // uses `FinishReason::ToolCalls`
+        // instead of `Stop`.
+        "response.output_item.added" => {
+            let item = &parsed["item"];
+            if item["type"].as_str() == Some("function_call") {
+                *has_function_call = true;
+                let id = item["id"].as_str().unwrap_or("").to_string();
+                let name = item["name"].as_str().unwrap_or("").to_string();
+                Some(CompletionChunk::ToolCallDelta {
+                    id,
+                    name_delta: name,
+                    arguments_delta: String::new(),
+                })
+            } else {
+                None
+            }
+        }
+        // `response.function_call_arguments.delta`
+        // fires many times per call as the
+        // model streams the JSON arguments
+        // string. We emit one
+        // `ToolCallDelta` per event with
+        // the new piece of arguments. The
+        // `id` is the function call's
+        // `item_id` — the consumer
+        // reassembles by id and uses the
+        // first non-empty one as the
+        // call id.
+        "response.function_call_arguments.delta" => {
+            let id = parsed["item_id"].as_str().unwrap_or("").to_string();
+            let delta = parsed["delta"].as_str().unwrap_or("").to_string();
+            if delta.is_empty() {
+                None
+            } else {
+                Some(CompletionChunk::ToolCallDelta {
+                    id,
+                    name_delta: String::new(),
+                    arguments_delta: delta,
+                })
             }
         }
         "response.completed" => {
@@ -433,7 +513,21 @@ fn map_responses_sse_event(parsed: &Value, model: &str) -> Option<CompletionChun
                     .unwrap_or(0) as u32,
             };
             let status = parsed["response"]["status"].as_str().unwrap_or("completed");
-            let reason = if status == "incomplete" {
+            let reason = if *has_function_call {
+                // The OpenAI Responses API
+                // does NOT send an
+                // explicit `finish_reason`
+                // in `response.completed`
+                // — the wire leaves that
+                // inference to the
+                // consumer. We saw at
+                // least one function_call
+                // output item above, so
+                // the model stopped
+                // because it wanted to
+                // call a tool.
+                FinishReason::ToolCalls
+            } else if status == "incomplete" {
                 let why = parsed["response"]["incomplete_details"]["reason"]
                     .as_str()
                     .unwrap_or("");

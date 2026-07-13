@@ -168,6 +168,127 @@ const TEST_API_KEY: &str = "sk-EXFILTRATION-MARKER-do-not-log-in-tracing";
 const TEST_PROMPT: &str = "PROMPT-EXFILTRATION-MARKER-do-not-log-in-tracing";
 
 // ---------------------------------------------------------------------------
+// Phase 3 — describe_capabilities is sync, no I/O, no re-unseal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn describe_capabilities_does_not_touch_security() {
+    // `describe_capabilities` is
+    // part of the `LlmV1` trait
+    // (see `afa-contracts`); the
+    // adapter is expected to
+    // implement it as a
+    // synchronous function that
+    // returns the
+    // `ModelCapabilities` card
+    // for its model without
+    // performing any I/O — in
+    // particular, it must NOT
+    // call `security.unseal`
+    // (the key is irrelevant;
+    // the card is a static
+    // config lookup). This test:
+    //   1. Builds the adapter with
+    //      a `CountingFakeSecurity`
+    //      whose `unseal` call
+    //      count is observable.
+    //   2. Calls
+    //      `describe_capabilities`
+    //      once. Asserts the
+    //      returned card is the
+    //      expected gpt-4o card
+    //      (Phase 1: the
+    //      gpt-4o / gpt-4o-mini
+    //      / gpt-4.1 / gpt-5
+    //      / o3 / o4-mini family
+    //      is in the config, with
+    //      context windows, tool
+    //      support, and vision
+    //      support).
+    //   3. Calls it a second time.
+    //      Asserts the counter
+    //      stayed at 0 (no
+    //      `unseal` call), the
+    //      second card equals
+    //      the first (no
+    //      mutation), and the
+    //      function is callable
+    //      on `&self` (not
+    //      requiring `&mut`).
+    // Why this matters: the
+    // `CapabilityRegistry` may
+    // call `describe_capabilities`
+    // many times (e.g. once per
+    // request). If each call
+    // round-tripped to the
+    // security engine to unseal
+    // the key, the registry
+    // would be a hot, slow path.
+    // The contract — `describe`
+    // is cheap, sync, pure —
+    // makes the registry's
+    // hot path a config lookup.
+    // Note: this test does NOT
+    // need a wiremock server —
+    // `describe_capabilities`
+    // never touches the network
+    // or the security engine.
+    // We just need a `ResponsesConfig`
+    // with a placeholder base
+    // URL so the constructor
+    // is happy.
+    let sec = Arc::new(CountingFakeSecurity {
+        call_count: Mutex::new(0),
+    });
+    let bus = EventBus::new();
+    let config = ResponsesConfig::responses_gpt_4o_with_base_url(
+        key_ref(),
+        "http://127.0.0.1:0/never-called",
+    );
+    let adapter = ResponsesAdapter::new(config, sec.clone(), bus.handle());
+    // Counter starts at 0.
+    assert_eq!(*sec.call_count.lock().unwrap(), 0);
+
+    // First call.
+    let card1 = adapter.describe_capabilities();
+    // The counter is STILL 0.
+    assert_eq!(
+        *sec.call_count.lock().unwrap(),
+        0,
+        "describe_capabilities must NOT call security.unseal on the first call"
+    );
+    // The card is non-empty and
+    // has the expected shape.
+    assert!(
+        card1.max_context_tokens > 0,
+        "card.max_context_tokens must be > 0 (gpt-4o is 128k)"
+    );
+    assert!(
+        card1.supports_tool_use,
+        "gpt-4o must report supports_tool_use = true"
+    );
+    assert!(
+        card1.supports_vision,
+        "gpt-4o must report supports_vision = true"
+    );
+
+    // Second call. The card
+    // is identical (no
+    // mutation) and the
+    // counter is STILL 0.
+    let card2 = adapter.describe_capabilities();
+    assert_eq!(
+        *sec.call_count.lock().unwrap(),
+        0,
+        "describe_capabilities must NOT call security.unseal on the second call either (the card is cached in config)"
+    );
+    assert_eq!(
+        card1, card2,
+        "second describe_capabilities call must return the same card (no mutation)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
@@ -231,6 +352,52 @@ impl SecurityV1 for FakeRotatingSecurity {
             b"sk-v2".to_vec()
         };
         Ok(UnsealedSecret::new(bytes))
+    }
+    async fn rotate(
+        &self,
+        _secret_ref: &SecretRef,
+        _new_plaintext: &[u8],
+        _ctx: &ExecutionContext,
+    ) -> Result<SecretRef, SecurityErrorV1> {
+        unimplemented!()
+    }
+}
+
+/// A fake `SecurityV1` whose
+/// `unseal` call count is
+/// observable. Used by the
+/// `describe_capabilities_does_not_touch_security`
+/// test (Phase 3): the test
+/// calls `describe_capabilities`
+/// twice and asserts the counter
+/// stays at 0. `describe_capabilities`
+/// is synchronous and does not
+/// need the unsealed key (it
+/// returns the model capabilities
+/// from `ResponsesConfig` directly),
+/// so a second call must NOT
+/// trigger another `unseal` —
+/// that would be a violation of
+/// the "no I/O in describe" rule
+/// and a slow hot path for
+/// `CapabilityRegistry`.
+struct CountingFakeSecurity {
+    call_count: Mutex<u32>,
+}
+
+#[async_trait]
+impl SecurityV1 for CountingFakeSecurity {
+    async fn seal(&self, _plaintext: &[u8], _name: &str) -> Result<SecretRef, SecurityErrorV1> {
+        unimplemented!()
+    }
+    async fn unseal(
+        &self,
+        _name: &SecretRef,
+        _ctx: &ExecutionContext,
+    ) -> Result<UnsealedSecret, SecurityErrorV1> {
+        let mut n = self.call_count.lock().unwrap();
+        *n += 1;
+        Ok(UnsealedSecret::new(TEST_API_KEY.as_bytes().to_vec()))
     }
     async fn rotate(
         &self,
