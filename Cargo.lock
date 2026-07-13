@@ -128,6 +128,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "afa-plugin-llm-openai-compat"
+version = "0.1.0"
+dependencies = [
+ "afa-bus",
+ "afa-contracts",
+ "afa-llm",
+ "async-trait",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+ "zeroize",
+]
+
+[[package]]
 name = "afa-security"
 version = "0.1.0"
 dependencies = [

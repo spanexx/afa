@@ -8,4 +8,5 @@ members = [
     "crates/afa-security",
     "crates/afa-llm",
     "crates/afa-plugin-llm-http",
+    "crates/afa-plugin-llm-openai-compat",
 ]
