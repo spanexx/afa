@@ -164,6 +164,41 @@ pub struct KnowledgeRecordStored {
 
 impl AfaEvent for KnowledgeRecordStored {}
 
+// CID:knowledge-events-003 - KnowledgeTopicsListed
+// Purpose: The audit fact the adapter
+// publishes on the event bus AFTER every
+// `list_topics` call returns. Carries the
+// `ExecutionContext` metadata, the topic
+// count, and the duration in milliseconds.
+// Does NOT carry the topic names (the
+// topics are the *return value* of the
+// call; the event is the audit fact, not
+// the result). The event does NOT fire on
+// `list_topics` errors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeTopicsListed {
+    /// The tracking number from the
+    /// `ExecutionContext`.
+    pub correlation_id: CorrelationId,
+    /// The tenant from the `ExecutionContext`.
+    pub tenant_id: TenantId,
+    /// The actor from the `ExecutionContext`.
+    pub actor: Actor,
+    /// The wall-clock time the adapter
+    /// finished the list call.
+    pub timestamp: DateTime<Utc>,
+    /// The number of topics returned by
+    /// the call. `0` is a valid, interesting
+    /// value (it means "no topics yet"); the
+    /// event still fires.
+    pub topic_count: u32,
+    /// The wall-clock duration of the call
+    /// in milliseconds.
+    pub duration_ms: u32,
+}
+
+impl AfaEvent for KnowledgeTopicsListed {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

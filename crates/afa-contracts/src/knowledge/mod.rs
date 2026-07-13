@@ -49,7 +49,7 @@ use async_trait::async_trait;
 use crate::execution_context::ExecutionContext;
 pub use capabilities::KnowledgeCapabilities;
 pub use error::{KnowledgeErrorKind, KnowledgeErrorV1};
-pub use events::{KnowledgeQueried, KnowledgeRecordStored};
+pub use events::{KnowledgeQueried, KnowledgeRecordStored, KnowledgeTopicsListed};
 pub use record::{KnowledgeRecord, KnowledgeRecordInput, RecordId};
 pub use request::{FindInformationRequest, FindInformationResponse};
 pub use topic::Topic;

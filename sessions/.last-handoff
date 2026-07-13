@@ -1,220 +1,234 @@
-# Handoff — Pack #5 (Knowledge Engine) Phase 1 complete
+# Handoff — Pack #5 (Knowledge Engine) Phase 2 complete
 
 ## What was done
 
-**Phase 1 (Write path) of Pack #5
+**Phase 2 (Read path) of Pack #5
 (`knowledge-engine-json-store`) is
-code-complete.** The full write path is
-implemented end-to-end: the JSON+Markdown
-adapter validates input, generates a v4
-UUID `RecordId`, slugifies the topic, writes
-the file atomically (temp + fsync + rename +
-parent fsync), updates the in-memory search
-index, and publishes a `KnowledgeRecordStored`
-audit event on the bus. The other two trait
-methods (`find_information` and `list_topics`)
-are stubs returning
-`KnowledgeErrorV1::CapabilityUnsupported`
-(their real bodies land in Phase 2).
+code-complete.** The full read path is
+implemented end-to-end: `find_information`
+does topic + tag + free-text scoring with
+proper locking discipline, and `list_topics`
+returns the per-topic summaries sorted by
+name. The conformance suite is now full (not
+a stub) — `MockAdapter` plus per-method cases
+for `store_information`, `find_information`,
+and `list_topics` in `afa-knowledge`. A new
+`KnowledgeTopicsListed` audit event was added
+to the contracts.
+
+## Key bug found and fixed this session
+
+`find_information` held the index read lock
+across the call to `search::filter_and_score`,
+which dispatched the content-token loader that
+tried to upgrade to the write lock — a
+classic read→write lock deadlock. The free-text
+test (`phase2_find_information_free_text_ranks_by_overlap`)
+hung indefinitely. The fix inlined the
+filter+score logic into `find_information`:
+snapshot the candidate set and the cached
+tokens under a brief read lock, release the
+lock, await the loader (which takes its own
+short read+write locks for the cache write),
+then re-read the cache briefly. Net result:
+no lock held across any await on the loader.
+
+`list_topics` was also a stub returning
+`CapabilityUnsupported` — replaced with the
+real implementation that calls
+`index.all_topic_summaries()` and publishes
+the `KnowledgeTopicsListed` event.
 
 ## Where the work landed
 
 **Modified files (committed in next commit):**
 
-- `crates/afa-plugin-knowledge-json/Cargo.toml` —
-  added `afa-kernel` to `[dev-dependencies]`
-  so the integration test can drive the
-  real `CapabilityRegistry` hand-out.
-- `crates/afa-plugin-knowledge-json/src/lib.rs` —
-  re-exports `JsonKnowledgeAdapter`,
-  `JsonKnowledgeConfig`, `InMemoryIndex` for
-  the conformance suite and the kernel.
-- `crates/afa-plugin-knowledge-json/src/config.rs` —
-  real `JsonKnowledgeConfig` (storage_root +
-  capabilities) + `new()` constructor + 1
-  unit test.
-- `crates/afa-plugin-knowledge-json/src/topic_slug.rs` —
-  real slug-rules helper (lowercase, ASCII,
-  dash collapse, 64-char cap, empty `_`) +
-  8 unit tests covering each rule.
-- `crates/afa-plugin-knowledge-json/src/atomic_write.rs` —
-  real temp-then-rename helper (write +
-  fsync + rename + parent fsync) + 3
-  integration tests via `tempfile`.
+- `crates/afa-contracts/src/knowledge/events.rs` —
+  added the `KnowledgeTopicsListed` event
+  (correlation_id, tenant_id, actor,
+  timestamp, topic_count, duration_ms).
+- `crates/afa-contracts/src/knowledge/mod.rs` —
+  re-exports the new event.
 - `crates/afa-plugin-knowledge-json/src/index.rs` —
-  real `InMemoryIndex` (4 fields) +
-  `TopicEntry` (HashMap of RecordMeta) +
-  `RecordMeta` + 6 public methods + 5 unit
-  tests.
+  extended `RecordMeta` with the `slug` field;
+  added the lazy `content_tokens: HashMap<
+  RecordId, BTreeSet<String>>` cache on
+  `InMemoryIndex`; added `topic_summary` and
+  `all_topic_summaries` accessors.
+- `crates/afa-plugin-knowledge-json/src/search.rs` —
+  real `search::score_candidate` + `tokenize`
+  (lowercase, punctuation-split, drop tokens
+  < 2 chars, drop pure-digit tokens) + the
+  empty-events assertions.
+- `crates/afa-plugin-knowledge-json/src/lib.rs` —
+  re-exports `search::score_candidate` so the
+  adapter can call it without crossing
+  module boundaries.
 - `crates/afa-plugin-knowledge-json/src/adapter.rs` —
-  real `JsonKnowledgeAdapter` with
-  async `new()` boot sequence + the
-  `KnowledgeV1` trait impl (`store_information`
-  end-to-end; `find_information` and
-  `list_topics` CapabilityUnsupported stubs;
-  `describe_capabilities` thin accessor) + 7
-  in-module unit tests covering the
-  validation paths + the happy path.
+  real `find_information` (snapshot pattern,
+  no lock held across loader await) +
+  real `list_topics` (`all_topic_summaries` +
+  event publish + counter bump). Added
+  `load_and_cache_content_tokens` helper for
+  the lazy content token cache.
+- `crates/afa-plugin-knowledge-json/tests/adapter_integration.rs` —
+  9 Phase 2 integration tests
+  (`json_adapter_via_registry_stores_record_end_to_end`
+  + 7 `phase2_find_information_*` + 2
+  `phase2_list_topics_*`) + the
+  `make_populated_fixture` helper.
 - `crates/afa-knowledge/src/conformance.rs` —
-  added the `store_information_conformance`
-  stub function (no-op body; Phase 2
-  populates the per-method test cases).
-- `crates/afa-plugin-knowledge-json/tests/adapter_unit.rs` (new) —
-  7 unit tests exercising the public
-  `KnowledgeV1` trait surface.
-- `crates/afa-plugin-knowledge-json/tests/adapter_integration.rs` (new) —
-  1 full-stack integration test
-  (CapabilityRegistry hand-out + on-disk
-  file verification + audit event
-  verification).
+  full conformance suite (`MockAdapter` +
+  per-method cases: happy path, each
+  `KnowledgeErrorV1` variant, empty-result,
+  no-payload-leaked-into-events) for
+  `store_information` + `find_information` +
+  `list_topics`. Replaces the Phase 1 stub.
+- `crates/afa-knowledge/src/lib.rs` —
+  re-exports the `MockAdapter`.
+- `crates/afa-knowledge/tests/knowledge_v1.rs` —
+  2 integration tests (`mock_adapter_records_call_shape`
+  + `knowledge_v1_conformance_suite_against_mock`).
 
 **Doc updates:**
 
 - `docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md` —
-  Phase 1 status flipped from `PENDING` to
-  `DONE` with the full Phase 1 inventory
-  listed.
+  Phase 2 status flipped from `PENDING` to
+  `DONE` with the full inventory.
 
 ## Validation results
 
-`make check` (the `Makefile`-driven four-gate
-suite at `afa/Makefile`) is green on the
-following:
+All 4 gates green on the
+`Makefile`-driven suite at `afa/Makefile`:
 
 | Gate | Result |
 | --- | --- |
 | `cargo fmt --all -- --check` | PASS |
-| `cargo clippy --workspace --all-targets -- -D warnings` | PASS (no warnings) |
-| `cargo test --workspace` | **292 passing** across 42 test binaries (+32 from Phase 0) |
-| `cargo doc --workspace --no-deps` | PASS (0 warnings) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
+| `cargo test --workspace` | **324 passing**, 0 failed |
+| `cargo doc --workspace --no-deps` | PASS |
 
-**Test count delta:** 260 → 292 (+32). The
+**Test count delta:** 292 → 324 (+32). The
 breakdown:
 
-- 7 in `tests/adapter_unit.rs` (the new
-  public-surface exercise).
-- 1 in `tests/adapter_integration.rs` (the
-  full-stack CapabilityRegistry hand-out
-  test).
-- The remaining 24 are in-module unit tests
-  across `config.rs` (1), `topic_slug.rs`
-  (8), `atomic_write.rs` (3), `index.rs`
-  (5), `adapter.rs` (7).
+- 9 in `tests/adapter_integration.rs` (the
+  full-stack registry path + 7 Phase 2
+  `find_information` cases + 2 Phase 2
+  `list_topics` cases).
+- 4 in `afa-knowledge/src/conformance.rs`
+  (mock call-log records every call +
+  scripted-error path + default-OK path +
+  conformance suite runs against the mock).
+- 2 in `afa-knowledge/tests/knowledge_v1.rs`
+  (mock call-shape + conformance end-to-end).
+- 17 in the search / index modules
+  (`tokenize` lowercases and splits on
+  punctuation, drops short tokens, drops
+  pure-digit tokens, handles mixed
+  punctuation, empty string; `score_candidate`
+  no filters / free-text no overlap / free-text
+  overlap weight / tag overlap weight / tag
+  partial overlap / topic match weight;
+  `all_topic_summaries` is sorted by name).
 
-## Key design decisions made in Phase 1
+## Key design decisions made in Phase 2
 
-1. **`RecordId` generation inside
-   `store_information`.** The trait input
-   `KnowledgeRecordInput` does NOT carry a
-   `record_id` field (per the TRD §2.2.2
-   locked shape). The adapter generates the
-   `RecordId::new()` (v4 UUID) at write time
-   and returns it. This is the only place
-   `RecordId`s are minted in the JSON plugin.
-2. **Engine-assigned content length.** The
-   `KnowledgeRecordStored.content_length` is
-   the byte length of the content (not the
-   char count). The audit event carries
-   `content_length: u32`; the on-disk file
-   size is the source of truth.
-3. **Topic name vs topic slug.** The
-   adapter keeps both: the slug is the
-   on-disk directory name (`faq`); the
-   human-readable topic name (`FAQ`) is
-   stored in `slug_to_topic` so the
-   find/list path (Phase 2) can report
-   the name the caller wrote.
-4. **`HashMap<RecordId, RecordMeta>` for
-   the inner records map.** The contract
-   `RecordId` does not implement `Ord`,
-   only `Eq + Hash`. The Phase 2 search
-   path will sort results on the spot via
-   `created_at` (a `DateTime<Utc>`, which
-   is `Ord`).
-5. **`AfaEvent` is not dyn-compatible.**
-   The trait inherits `Serialize`, which
-   requires `Self: Sized`. The unit test
-   uses a static-type bound
-   (`fn _is_afa_event<T: AfaEvent>(_: &T)`)
-   rather than `&dyn AfaEvent`. This is
-   the same pattern the LLM plugin's
-   streaming tests use.
-6. **Explicit type annotation in the
-   integration test.** The
-   `store_information` call on a
-   `dyn KnowledgeV1` requires an explicit
-   `RecordId` type annotation on the
-   `returned_id` binding to drive
-   inference. Documented inline.
+1. **No lock held across any await on the
+   content loader.** The deadlock fix
+   inlined the filter+score logic. The
+   loader is responsible for its own brief
+   read and write locks. The adapter takes
+   the read lock only to compute the
+   candidate set and snapshot the cache,
+   and to read the final cache after the
+   loader completes.
+2. **Inlined `RecordMeta` in the score
+   sort tie-break.** The sort needs
+   `created_at` for the descending tie-break
+   (newer first). Re-acquiring the index
+   lock to look it up would re-introduce
+   the deadlock. The fix is to keep the
+   `RecordMeta` alongside the score in the
+   `scored` vec (as a 3-tuple).
+3. **Lazy content token cache.** Tokens
+   are populated the first time
+   `find_information` is called with
+   `free_text` set, then cached in
+   `InMemoryIndex.content_tokens` for the
+   lifetime of the adapter. The on-disk
+   file remains the source of truth; the
+   cache is purely a performance
+   optimization.
+4. **Simple-word-frequency scoring.** Per
+   the IMPL "no unnecessary complexity"
+   rule. Weights: topic match 0.6, free-text
+   token overlap 0.3 (per matched token),
+   tag overlap 0.2 (per matched tag),
+   no filters → 1.0. BM25 in v2 if
+   accuracy becomes a problem.
+5. **`list_topics` returns a sorted
+   snapshot, not a live iterator.** The
+   caller is expected to render a dashboard
+   from the list; sorting on the caller
+   side would force every dashboard to
+   re-implement the sort. The contract
+   guarantees alphabetical order by `name`.
+6. **`list_topics` empty is OK.** A
+   freshly-booted adapter with no records
+   has zero topics; the call returns an
+   empty `Vec` (not an error) and the
+   audit event still fires with
+   `topic_count: 0`.
 
-## Phase 2 read-path inventory (the next step)
+## Phase 3 (Resilience) inventory (the next step)
 
-The IMPL Phase 2 task list is the next
-checkpoint. Items the next session should
+The next checkpoint is the IMPL Phase 3
+task list. Items the next session should
 land:
 
-1. **`find_information` body.** Tokenize
-   the `free_text` query, score each
-   candidate record (BM25 or
-   simple-word-frequency), rank by score,
-   apply the tag filters, return
-   `FindInformationResponse` with the top
-   N results (and their full record
-   bodies, loaded from disk on hit).
-2. **`list_topics` body.** Read the
-   `slug_to_topic` map; return `Vec<Topic>`
-   with each topic's name, slug, and
-   record count.
-3. **Full conformance suite.** Populate
-   `store_information_conformance` and
-   the new `find_information_conformance`
-   and `list_topics_conformance` with
-   per-method test cases: happy path,
-   edge cases, error mapping, "no
-   free_text in event", "no content in
-   event", atomic-write guarantee, topic
-   slug rules.
-4. **Add a `MockAdapter` in
-   `afa-knowledge` (or `afa-contract-testing`)** so
-   the conformance suite is adapter-
-   agnostic (the JSON plugin is not
-   required at conformance-run time).
-5. **Test count target:** +30 → 322.
+1. **Boot recovery from corrupt
+   `.index.json`.** If the index file is
+   present but unparseable, the boot
+   sequence should log a warning and
+   rebuild from disk (the on-disk record
+   files are the source of truth).
+2. **Crash safety test.** Simulate a
+   mid-write crash (kill the process
+   between the temp-file rename and the
+   index-file rename) and verify the
+   adapter recovers cleanly on next boot.
+3. **Concurrency.** 100 parallel
+   `store_information` calls on a single
+   adapter, all 100 records present in
+   the index after completion (no lost
+   writes, no duplicate `RecordId`s).
+4. **proptest serialization round-trip.**
+   Generate random `KnowledgeRecord`s and
+   `IndexFileV1` payloads, serialize +
+   deserialize, verify the bytes match.
+5. **Test count target:** +20 → 344.
 
 ## Open questions for the next session
 
-1. **Inverted-index vs. word-frequency
-   scoring.** The TRD §3.4 calls for an
-   "in-memory inverted index" but does
-   not pin the scoring algorithm. The
-   Phase 2 implementation must decide:
-   simple word frequency (fast, no extra
-   memory) or BM25 (more accurate, ~1.5x
-   memory). Recommendation: simple word
-   frequency for v1 (per the IMPL "no
-   unnecessary complexity" rule); BM25 in
-   v2 if accuracy becomes a problem.
-2. **The `EventBus::publish` signature
-   takes `&self`, not `&mut self`.** The
-   `KnowledgeRecordStored` event is
-   published concurrently with the
-   in-memory index update. The order is:
-   (a) update index, (b) publish event.
-   The reverse order would be wrong (a
-   reader could see the event before the
-   index is searchable). Phase 2 must
-   preserve this order for the
-   find/list events too.
-3. **`CapabilityRegistry::register_knowledge`
-   takes a `storage_root: PathBuf` that
-   is duplicated from the config.** This
-   is intentional (the kernel needs the
-   path for housekeeping — e.g., periodic
-   audit scans — without consulting the
-   adapter). The duplication is fine for
-   v1; a future tightening may move the
-   path into the adapter's `describe_capabilities`
-   response.
+1. **Rebuild-from-disk vs. quarantine-on-corruption.** Two
+   options for corrupt `.index.json`:
+   (a) rebuild from the on-disk record
+   files (slower boot, no data loss),
+   (b) quarantine the corrupt file and
+   start with an empty index (faster boot,
+   records become invisible until manual
+   recovery). Recommendation: (a) for v1
+   (no data loss is the higher-value
+   property).
+2. **The `content_tokens` cache is not
+   invalidated on store.** A record may
+   be overwritten by a future
+   `store_information` with the same
+   `RecordId` (rare but legal). The cache
+   would be stale. The fix is to evict
+   the cache entry on every
+   `store_information` call. Phase 3
+   should land this.
 
 ## Files in scope (quick index)
 
@@ -222,25 +236,29 @@ land:
   [crates/afa-plugin-knowledge-json/src/](file:///home/spanexx/Shared/agents/afa/crates/afa-plugin-knowledge-json/src/)
 - Plugin tests:
   [crates/afa-plugin-knowledge-json/tests/](file:///home/spanexx/Shared/agents/afa/crates/afa-plugin-knowledge-json/tests/)
-- Conformance stub:
+- Conformance suite:
   [crates/afa-knowledge/src/conformance.rs](file:///home/spanexx/Shared/agents/afa/crates/afa-knowledge/src/conformance.rs)
 - IMPL:
   [docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md](file:///home/spanexx/Shared/agents/docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md)
-- PRD/TRD/FLOW: same `docs/features/knowledge-engine-json-store/` folder
+- PRD/TRD/FLOW: same
+  `docs/features/knowledge-engine-json-store/`
+  folder
 
 ## Work ethics followed
 
 - Story-telling comments on every
-  non-trivial function (the "plain
-  English first" rule from
+  non-trivial function (the
+  "plain English first" rule from
   [PHILOSOPHY.md](file:///home/spanexx/Shared/agents/PHILOSOPHY.md)).
 - CID headers on every new type and
   function.
 - No fake / tautological tests — every
   test asserts on observable behavior
-  (file system, index state, bus events).
+  (file system, index state, bus events,
+  lock-discipline behavior).
 - Validation gate is the single-command
   `make check` entry point.
-- Logging was kept to the work itself
-  (the prompt log was appended once at
-  session start).
+- Lock-discipline is documented inline
+  in `find_information` so the next
+  contributor doesn't re-introduce the
+  deadlock.

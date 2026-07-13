@@ -36,6 +36,14 @@ pub use adapter::JsonKnowledgeAdapter;
 pub use config::JsonKnowledgeConfig;
 pub use index::InMemoryIndex;
 
+// Re-export the `Topic` type from the
+// contracts crate so the `list_topics`
+// path returns the contract type
+// without the adapter having to
+// qualify the path in every call
+// site.
+pub use afa_contracts::Topic;
+
 #[cfg(test)]
 mod tests {
     use super::*;

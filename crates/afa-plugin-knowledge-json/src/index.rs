@@ -1,12 +1,17 @@
 //! Code Map: InMemoryIndex
 //! - `InMemoryIndex`: The in-RAM index the
-//!   adapter holds. Four pieces of state:
+//!   adapter holds. Six pieces of state:
 //!   `topics: BTreeMap<Slug, TopicEntry>`,
 //!   `tag_index: BTreeMap<Tag, HashSet<RecordId>>`,
 //!   `slug_to_topic: BTreeMap<Slug, TopicName>`,
 //!   `store_information_calls: u64` (the
 //!   audit-trail counter for the
-//!   `store_information` method).
+//!   `store_information` method),
+//!   `find_information_calls: u64` (the
+//!   audit-trail counter for the
+//!   `find_information` method, added
+//!   in Phase 2), `list_topics_calls: u64`
+//!   (same shape, Phase 2).
 //! - `TopicEntry`: One topic's worth of
 //!   records. Fields: `records:
 //!   HashMap<RecordId, RecordMeta>`
@@ -16,19 +21,26 @@
 //!   `Ord`, only `Eq + Hash`),
 //!   `record_count: u64`.
 //! - `RecordMeta`: One record's worth of
-//!   searchable metadata. Fields: `record_id`,
-//!   `topic`, `tags`, `size_bytes`, `created_at`
-//!   (`DateTime<Utc>`), `preview` (first 256
-//!   chars of the content).
+//!   searchable metadata. Fields:
+//!   `record_id`, `topic`, `tags`,
+//!   `size_bytes`, `created_at`
+//!   (`DateTime<Utc>`), `preview`
+//!   (first 256 chars of the content),
+//!   `slug` (the on-disk directory
+//!   name; added in Phase 2 so the
+//!   search path can compute the
+//!   file path without re-slugifying
+//!   the topic).
 //!
-//! Story (plain English): The in-memory index
-//! is the part of the adapter that lets the
-//! "find" path skip parsing every file on
-//! disk. The adapter always writes the file
-//! (the on-disk record is the source of
-//! truth) and then adds an entry to the
-//! index. The index is rebuilt on boot by
-//! scanning the storage root.
+//! Story (plain English): The in-memory
+//! index is the part of the adapter that
+//! lets the "find" path skip parsing
+//! every file on disk. The adapter always
+//! writes the file (the on-disk record is
+//! the source of truth) and then adds an
+//! entry to the index. The index is
+//! rebuilt on boot by scanning the
+//! storage root.
 //!
 //! CID Index:
 //! CID:afa-plugin-knowledge-json-index-001 -> InMemoryIndex
@@ -51,7 +63,13 @@ use chrono::{DateTime, Utc};
 // `preview` is the first 256 chars of the
 // content (the LLM gets a free preview
 // without the adapter having to re-read the
-// file).
+// file). `slug` is the on-disk directory
+// name (the adapter computes it at store
+// time and stores it here so the search
+// path can build the file path
+// `<storage_root>/<slug>/<record_id>.md`
+// without re-slugifying the topic name).
+#[derive(Clone)]
 pub struct RecordMeta {
     pub record_id: RecordId,
     pub topic: String,
@@ -59,6 +77,13 @@ pub struct RecordMeta {
     pub size_bytes: u64,
     pub created_at: DateTime<Utc>,
     pub preview: String,
+    /// The on-disk directory name (the
+    /// slugified topic). Computed by the
+    /// adapter at store time and stored
+    /// here so the `find_information`
+    /// path can build the file path
+    /// without re-slugifying.
+    pub slug: String,
 }
 
 // CID:afa-plugin-knowledge-json-index-002 - TopicEntry
@@ -93,7 +118,18 @@ pub struct TopicEntry {
 // in result records. The `tag_index` is a
 // simple `Tag -> HashSet<RecordId>` reverse
 // index that the search path consults when
-// the query has tag filters.
+// the query has tag filters. The three
+// `*_calls` fields are the audit-trail
+// counters the `describe_capabilities` (and,
+// in Phase 4, the health check) consults to
+// report "I have answered N find / M
+// store / K list calls so far". The
+// `content_tokens` cache is the Phase 2
+// per-record tokenized content (the search
+// path reads the file from disk on the
+// first query that needs a record's
+// content and caches the token set here;
+// subsequent queries reuse the cache).
 #[derive(Default)]
 pub struct InMemoryIndex {
     pub topics: BTreeMap<String, TopicEntry>,
@@ -105,6 +141,23 @@ pub struct InMemoryIndex {
     /// this; the Phase 2 search path does
     /// not.
     pub store_information_calls: u64,
+    /// Audit-trail counter. Increments on
+    /// every successful `find_information`
+    /// call (added in Phase 2).
+    pub find_information_calls: u64,
+    /// Audit-trail counter. Increments on
+    /// every successful `list_topics` call
+    /// (added in Phase 2).
+    pub list_topics_calls: u64,
+    /// Phase 2 lazy content token cache. The
+    /// search path populates this the
+    /// first time a record's content
+    /// tokens are needed; subsequent
+    /// queries reuse the cached tokens.
+    /// Keyed by `RecordId` (the
+    /// `HashSet<RecordId>` is fine for
+    /// the same reason as in `tag_index`).
+    pub content_tokens: HashMap<RecordId, BTreeSet<String>>,
 }
 
 impl InMemoryIndex {
@@ -150,6 +203,7 @@ impl InMemoryIndex {
                 size_bytes,
                 created_at: Utc::now(),
                 preview: input.content.chars().take(256).collect(),
+                slug: slug.to_string(),
             },
         );
         entry.record_count = entry.records.len() as u64;
@@ -198,6 +252,42 @@ impl InMemoryIndex {
         self.tag_index.get(tag).cloned().unwrap_or_default()
     }
 
+    /// Returns the intersection of the
+    /// `RecordId` sets for every tag in
+    /// `tags` (AND-filter). An empty
+    /// `tags` slice returns an empty set
+    /// (the caller short-circuits to "no
+    /// tag filter" before this method is
+    /// called; this method always
+    /// interprets its argument as a
+    /// non-empty filter).
+    pub fn records_with_all_tags(&self, tags: &[String]) -> HashSet<RecordId> {
+        if tags.is_empty() {
+            return HashSet::new();
+        }
+        // Seed with the first tag's
+        // record set; intersect the
+        // rest. The caller is expected
+        // to have already deduped the
+        // input; an unknown tag
+        // collapses the intersection
+        // to empty (the
+        // `unwrap_or_default` path).
+        let mut iter = tags.iter();
+        let first = iter.next().expect("non-empty");
+        let mut acc = self.records_with_tag(first);
+        for tag in iter {
+            acc = acc
+                .intersection(&self.records_with_tag(tag))
+                .copied()
+                .collect();
+            if acc.is_empty() {
+                break;
+            }
+        }
+        acc
+    }
+
     /// Returns the topic name for `slug`
     /// (the human-readable name the
     /// `find_information` results report
@@ -209,6 +299,101 @@ impl InMemoryIndex {
     /// wrote.
     pub fn topic_for_slug(&self, slug: &str) -> Option<String> {
         self.slug_to_topic.get(slug).cloned()
+    }
+
+    /// Returns the records in `slug`
+    /// (the topic filter for
+    /// `find_information`). An empty
+    /// `Vec` is returned for an unknown
+    /// topic.
+    pub fn records_in_topic(&self, slug: &str) -> Vec<(RecordId, RecordMeta)> {
+        self.topics
+            .get(slug)
+            .map(|e| e.records.iter().map(|(k, v)| (*k, clone_meta(v))).collect())
+            .unwrap_or_default()
+    }
+
+    /// Returns every record in the index
+    /// (the "no topic filter" path for
+    /// `find_information`). The records
+    /// are returned as `(RecordId,
+    /// RecordMeta)` pairs in arbitrary
+    /// order (the search path sorts by
+    /// score on top of this).
+    pub fn all_records(&self) -> Vec<(RecordId, RecordMeta)> {
+        self.topics
+            .values()
+            .flat_map(|e| e.records.iter().map(|(k, v)| (*k, clone_meta(v))))
+            .collect()
+    }
+
+    /// Returns the `Topic` summary for
+    /// `slug` (the per-topic rollup for
+    /// `list_topics`). Returns `None` if
+    /// the topic does not exist in the
+    /// index.
+    pub fn topic_summary(&self, slug: &str) -> Option<crate::Topic> {
+        let entry = self.topics.get(slug)?;
+        let topic_name = self.slug_to_topic.get(slug)?.clone();
+        if entry.records.is_empty() {
+            return Some(crate::Topic {
+                name: topic_name,
+                record_count: 0,
+                first_record_at: None,
+                last_record_at: None,
+                tag_count: 0,
+            });
+        }
+        let mut first: Option<DateTime<Utc>> = None;
+        let mut last: Option<DateTime<Utc>> = None;
+        let mut tag_union: BTreeSet<String> = BTreeSet::new();
+        for meta in entry.records.values() {
+            first = Some(first.map_or(meta.created_at, |f| f.min(meta.created_at)));
+            last = Some(last.map_or(meta.created_at, |l| l.max(meta.created_at)));
+            for tag in &meta.tags {
+                tag_union.insert(tag.clone());
+            }
+        }
+        Some(crate::Topic {
+            name: topic_name,
+            record_count: entry.record_count as u32,
+            first_record_at: first,
+            last_record_at: last,
+            tag_count: tag_union.len() as u32,
+        })
+    }
+
+    /// Returns the list of all topics in
+    /// the index as `Topic` summaries,
+    /// sorted alphabetically by `name`.
+    /// The "no topics" path returns an
+    /// empty `Vec` (NOT an error).
+    pub fn all_topic_summaries(&self) -> Vec<crate::Topic> {
+        let mut summaries: Vec<crate::Topic> = self
+            .topics
+            .keys()
+            .filter_map(|slug| self.topic_summary(slug))
+            .collect();
+        summaries.sort_by(|a, b| a.name.cmp(&b.name));
+        summaries
+    }
+}
+
+/// Helper: clone a `RecordMeta` (the
+/// fields are owned strings + small
+/// integers; the clone is cheap and the
+/// alternative — a `Cow`/borrow dance —
+/// would leak the borrow lifetime into
+/// every search path caller).
+fn clone_meta(m: &RecordMeta) -> RecordMeta {
+    RecordMeta {
+        record_id: m.record_id,
+        topic: m.topic.clone(),
+        tags: m.tags.clone(),
+        size_bytes: m.size_bytes,
+        created_at: m.created_at,
+        preview: m.preview.clone(),
+        slug: m.slug.clone(),
     }
 }
 
@@ -279,5 +464,141 @@ mod tests {
         let idx = InMemoryIndex::new();
         let set = idx.records_with_tag("nope");
         assert!(set.is_empty());
+    }
+
+    #[test]
+    fn records_with_all_tags_is_intersection() {
+        let mut idx = InMemoryIndex::new();
+        let a = make_input(&["billing", "refund"], "a");
+        let b = make_input(&["billing"], "b");
+        let c = make_input(&["refund"], "c");
+        let id_a = RecordId::new();
+        let id_b = RecordId::new();
+        let id_c = RecordId::new();
+        idx.add_record(&a, "faq", id_a, 1);
+        idx.add_record(&b, "faq", id_b, 1);
+        idx.add_record(&c, "faq", id_c, 1);
+        let both = idx.records_with_all_tags(&["billing".into(), "refund".into()]);
+        assert_eq!(both.len(), 1);
+        assert!(both.contains(&id_a));
+        let only_billing = idx.records_with_all_tags(&["billing".into()]);
+        assert_eq!(only_billing.len(), 2);
+        assert!(only_billing.contains(&id_a));
+        assert!(only_billing.contains(&id_b));
+    }
+
+    #[test]
+    fn records_with_all_tags_empty_input_returns_empty() {
+        // The caller is expected to
+        // short-circuit before this
+        // method, but the method's
+        // contract must still be
+        // total: empty input returns
+        // an empty set (not all
+        // records, not an error).
+        let idx = InMemoryIndex::new();
+        let set = idx.records_with_all_tags(&[]);
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn records_in_topic_returns_records_for_known_slug() {
+        let mut idx = InMemoryIndex::new();
+        let input = make_input(&["billing"], "x");
+        let rid = RecordId::new();
+        idx.add_record(&input, "faq", rid, 1);
+        let records = idx.records_in_topic("faq");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].0, rid);
+        assert_eq!(records[0].1.topic, "FAQ");
+        assert_eq!(records[0].1.slug, "faq");
+    }
+
+    #[test]
+    fn records_in_topic_unknown_slug_returns_empty() {
+        let idx = InMemoryIndex::new();
+        assert!(idx.records_in_topic("nope").is_empty());
+    }
+
+    #[test]
+    fn all_records_iterates_every_record() {
+        let mut idx = InMemoryIndex::new();
+        idx.add_record(&make_input(&[], "a"), "faq", RecordId::new(), 1);
+        idx.add_record(
+            &KnowledgeRecordInput {
+                topic: "Properties".into(),
+                tags: vec![],
+                content: "b".into(),
+                source: None,
+            },
+            "properties",
+            RecordId::new(),
+            1,
+        );
+        let all = idx.all_records();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn topic_summary_empty_topic_has_no_timestamps() {
+        // A topic with no records has
+        // `None` for both timestamps
+        // (the empty fallback path).
+        // We construct the index in a
+        // way that puts a slug in the
+        // map with no records by
+        // round-tripping through
+        // `topic_summary` after a
+        // store + remove.
+        let mut idx = InMemoryIndex::new();
+        idx.add_record(&make_input(&[], "x"), "faq", RecordId::new(), 1);
+        // Force-remove the record by
+        // rebuilding the index
+        // directly (the adapter
+        // never does this; the test
+        // exercises the
+        // "empty topic" branch).
+        idx.topics.get_mut("faq").unwrap().records.clear();
+        idx.topics.get_mut("faq").unwrap().record_count = 0;
+        let summary = idx.topic_summary("faq").expect("topic exists");
+        assert_eq!(summary.name, "FAQ");
+        assert_eq!(summary.record_count, 0);
+        assert!(summary.first_record_at.is_none());
+        assert!(summary.last_record_at.is_none());
+        assert_eq!(summary.tag_count, 0);
+    }
+
+    #[test]
+    fn topic_summary_rolls_up_counts_and_timestamps() {
+        let mut idx = InMemoryIndex::new();
+        idx.add_record(&make_input(&["billing"], "a"), "faq", RecordId::new(), 1);
+        idx.add_record(&make_input(&["refund"], "b"), "faq", RecordId::new(), 1);
+        let summary = idx.topic_summary("faq").expect("topic exists");
+        assert_eq!(summary.name, "FAQ");
+        assert_eq!(summary.record_count, 2);
+        assert_eq!(summary.tag_count, 2);
+        assert!(summary.first_record_at.is_some());
+        assert!(summary.last_record_at.is_some());
+    }
+
+    #[test]
+    fn all_topic_summaries_is_sorted_by_name() {
+        let mut idx = InMemoryIndex::new();
+        idx.add_record(&make_input(&[], "x"), "faq", RecordId::new(), 1);
+        idx.add_record(
+            &KnowledgeRecordInput {
+                topic: "Zebra".into(),
+                tags: vec![],
+                content: "y".into(),
+                source: None,
+            },
+            "zebra",
+            RecordId::new(),
+            1,
+        );
+        let summaries = idx.all_topic_summaries();
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].name, "FAQ");
+        assert_eq!(summaries[1].name, "Zebra");
     }
 }

@@ -44,5 +44,6 @@ pub mod conformance;
 pub use afa_contracts::knowledge::{
     FindInformationRequest, FindInformationResponse, KnowledgeCapabilities, KnowledgeErrorKind,
     KnowledgeErrorV1, KnowledgeQueried, KnowledgeRecord, KnowledgeRecordInput,
-    KnowledgeRecordStored, KnowledgeV1, RecordId, Topic,
+    KnowledgeRecordStored, KnowledgeTopicsListed, KnowledgeV1, RecordId, Topic,
 };
+pub use conformance::{run_conformance_suite, MockAdapter, MockCall};

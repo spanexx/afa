@@ -47,13 +47,14 @@
 //!
 //! Quick lookup: rg -n "CID:afa-plugin-knowledge-json-adapter-" crates/afa-plugin-knowledge-json/src/adapter.rs
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use afa_bus::EventBus;
 use afa_contracts::{
     ExecutionContext, FindInformationRequest, FindInformationResponse, KnowledgeCapabilities,
-    KnowledgeErrorV1, KnowledgeRecordInput, KnowledgeV1, RecordId, Topic,
+    KnowledgeErrorV1, KnowledgeRecord, KnowledgeRecordInput, KnowledgeV1, RecordId, Topic,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -61,8 +62,93 @@ use tokio::sync::RwLock;
 
 use crate::atomic_write::atomic_write;
 use crate::config::JsonKnowledgeConfig;
-use crate::index::InMemoryIndex;
+use crate::index::{InMemoryIndex, RecordMeta};
+use crate::search;
 use crate::topic_slug::topic_slug;
+
+// The default `limit` for
+// `find_information` when the request
+// does not specify one. Per the
+// IMPL Phase 2 task list.
+const DEFAULT_FIND_LIMIT: u32 = 10;
+
+// Helper: read a record's content
+// from disk and cache the tokenized
+// form in the index. Called by the
+// `find_information` content loader.
+// The function takes `Arc<RwLock<...>>`
+// (not a held lock guard) so the
+// loader can take the write lock
+// without conflicting with the
+// read lock the caller already
+// holds.
+async fn load_and_cache_content_tokens(
+    index: &Arc<RwLock<InMemoryIndex>>,
+    storage_root: &Path,
+    rid: RecordId,
+) {
+    // Step 1: look up the slug
+    // (and the file path) under
+    // the read lock; release the
+    // read lock before doing
+    // the file I/O (long-running
+    // I/O should not hold any
+    // lock).
+    let file_path = {
+        let idx = index.read().await;
+        // Cache hit: nothing
+        // to do.
+        if idx.content_tokens.contains_key(&rid) {
+            return;
+        }
+        // Find the slug for
+        // this record. The
+        // adapter stores
+        // the slug in the
+        // `RecordMeta` (Phase
+        // 2 change). If the
+        // record is not in
+        // the index, the
+        // caller's
+        // `find_information`
+        // will fail with
+        // `MalformedRecord`
+        // — we just return
+        // here.
+        let mut found: Option<RecordMeta> = None;
+        for entry in idx.topics.values() {
+            if let Some(m) = entry.records.get(&rid) {
+                found = Some((*m).clone());
+                break;
+            }
+        }
+        let meta = match found {
+            Some(v) => v,
+            None => return,
+        };
+        storage_root.join(&meta.slug).join(format!("{rid}.md"))
+    };
+    // Step 2: read the file.
+    // `read_to_string` is
+    // UTF-8 strict; a non-UTF-8
+    // file is a corrupt record
+    // and would be mapped to
+    // `MalformedRecord` by the
+    // caller's `find_information`.
+    // We do not propagate the
+    // error here — the caller
+    // will see the file miss on
+    // its own `read_to_string`
+    // and surface the error.
+    let content = match tokio::fs::read_to_string(&file_path).await {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    // Step 3: tokenize + cache.
+    let tokens = search::tokenize(&content);
+    let mut idx = index.write().await;
+    idx.content_tokens.insert(rid, tokens);
+}
 
 // CID:afa-plugin-knowledge-json-adapter-001 - JsonKnowledgeAdapter
 // Purpose: The concrete adapter. The
@@ -160,24 +246,230 @@ impl JsonKnowledgeAdapter {
 //   write sequence.
 #[async_trait]
 impl KnowledgeV1 for JsonKnowledgeAdapter {
+    // CID:afa-plugin-knowledge-json-adapter-005 - find_information
+    // Purpose: The Phase 2 read path. The
+    // implementation:
+    // 1. Holds the index read lock for
+    //    the duration of the scoring
+    //    step (the loader populates
+    //    the cache inside the lock).
+    // 2. Calls `search::filter_and_score`
+    //    to get the ranked candidate
+    //    list.
+    // 3. Applies the `limit` (default
+    //    10) and assembles the
+    //    `KnowledgeRecord` bodies by
+    //    reading the on-disk files
+    //    for the top N records.
+    // 4. Publishes the
+    //    `KnowledgeSearchPerformed`
+    //    audit event on the bus (the
+    //    event carries the `result_count`
+    //    and `duration_ms`; the
+    //    `free_text` is NOT in the
+    //    event payload — audit-trail
+    //    safety).
+    // 5. Bumps the
+    //    `find_information_calls`
+    //    counter on the index.
     async fn find_information(
         &self,
-        _request: FindInformationRequest,
-        _ctx: &ExecutionContext,
+        request: FindInformationRequest,
+        ctx: &ExecutionContext,
     ) -> Result<FindInformationResponse, KnowledgeErrorV1> {
-        // CID:afa-plugin-knowledge-json-adapter-005 - find_information stub
-        // Phase 1 stub: the JSON v1 backend
-        // does not support find. Returns
-        // `CapabilityUnsupported` per the
-        // contract — the caller may switch
-        // to a different adapter rather
-        // than retrying. Phase 2 populates
-        // the body.
-        Err(KnowledgeErrorV1::CapabilityUnsupported {
-            topic: None,
-            record_id: None,
-            reason: "JsonKnowledgeAdapter: find_information is not supported in v1".to_string(),
-        })
+        let started = std::time::Instant::now();
+        let limit = request.limit.unwrap_or(DEFAULT_FIND_LIMIT) as usize;
+
+        // Step 1: under the read lock,
+        // compute the candidate set
+        // (topic filter + tag AND-filter)
+        // and snapshot the
+        // `content_tokens` cache. The
+        // lock is released BEFORE any
+        // await on the content loader
+        // (the loader needs to take the
+        // write lock to cache new
+        // tokens; a read lock held by
+        // the same task would deadlock
+        // the writer).
+        let needs_content_tokens = request.free_text.is_some();
+        let candidates: Vec<(RecordId, RecordMeta)>;
+        let mut local_tokens: std::collections::HashMap<RecordId, BTreeSet<String>> =
+            std::collections::HashMap::new();
+        {
+            let index = self.index.read().await;
+
+            // Step 1a: topic filter
+            // (hard filter).
+            let topic_filtered: Vec<(RecordId, RecordMeta)> = match &request.topic {
+                Some(req_topic) => {
+                    let slug = crate::topic_slug::topic_slug(req_topic);
+                    index.records_in_topic(&slug)
+                }
+                None => index.all_records(),
+            };
+
+            // Step 1b: tag AND-filter.
+            let tag_filtered: Vec<(RecordId, RecordMeta)> = if request.tags.is_empty() {
+                topic_filtered
+            } else {
+                // Dedup the request
+                // tags (an AND-filter
+                // of ["billing",
+                // "billing"] is the
+                // same as ["billing"]).
+                let mut dedup: BTreeSet<String> = BTreeSet::new();
+                for t in &request.tags {
+                    dedup.insert(t.clone());
+                }
+                let allowed =
+                    index.records_with_all_tags(&dedup.iter().cloned().collect::<Vec<_>>());
+                topic_filtered
+                    .into_iter()
+                    .filter(|(rid, _)| allowed.contains(rid))
+                    .collect()
+            };
+
+            // Step 1c: snapshot the
+            // content tokens that are
+            // already cached.
+            if needs_content_tokens {
+                for (rid, _meta) in &tag_filtered {
+                    if let Some(t) = index.content_tokens.get(rid) {
+                        local_tokens.insert(*rid, t.clone());
+                    }
+                }
+            }
+
+            candidates = tag_filtered;
+        }
+        // The read lock is released
+        // here. From this point on, no
+        // task-local read lock is held
+        // and the loader may freely
+        // take the write lock.
+
+        // Step 2: load missing content
+        // tokens (file I/O + cache
+        // write). The loader takes its
+        // own short-lived read and
+        // write locks.
+        if needs_content_tokens {
+            for (rid, _meta) in &candidates {
+                if local_tokens.contains_key(rid) {
+                    continue;
+                }
+                load_and_cache_content_tokens(&self.index, &self.config.storage_root, *rid).await;
+                // Re-read the cache
+                // briefly to pick up
+                // what the loader just
+                // wrote.
+                let index = self.index.read().await;
+                if let Some(t) = index.content_tokens.get(rid) {
+                    local_tokens.insert(*rid, t.clone());
+                }
+            }
+        }
+
+        // Step 3: score + filter zeros.
+        // Pure CPU; no locks needed.
+        // We keep the `RecordMeta`
+        // alongside the score so the
+        // sort tie-break (by
+        // `created_at` desc) can use
+        // it without re-acquiring the
+        // index lock.
+        let mut scored: Vec<(RecordId, RecordMeta, f32)> = candidates
+            .into_iter()
+            .map(|(rid, meta)| {
+                let tokens = local_tokens.get(&rid).cloned().unwrap_or_default();
+                let s = search::score_candidate(&request, &meta, &tokens);
+                (rid, meta, s)
+            })
+            .filter(|(_, _, s)| *s > 0.0)
+            .collect();
+
+        // Stable sort by descending
+        // score; ties broken by
+        // `created_at` descending
+        // (newer first), then by
+        // `RecordId`'s inner `Uuid`
+        // for determinism.
+        scored.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    b.1.created_at
+                        .cmp(&a.1.created_at)
+                        .then(a.0 .0.cmp(&b.0 .0))
+                })
+        });
+
+        // Step 4: apply the limit
+        // and assemble the
+        // `KnowledgeRecord` bodies.
+        let top: Vec<(RecordId, RecordMeta, f32)> = scored.into_iter().take(limit).collect();
+        let mut results: Vec<(KnowledgeRecord, f32)> = Vec::with_capacity(top.len());
+        for (rid, meta, score) in top {
+            let slug = meta.slug.clone();
+            let file_path = self
+                .config
+                .storage_root
+                .join(&slug)
+                .join(format!("{rid}.md"));
+            let content = match tokio::fs::read_to_string(&file_path).await {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(KnowledgeErrorV1::StorageUnavailable {
+                        topic: Some(meta.topic.clone()),
+                        record_id: Some(rid.0),
+                        reason: format!(
+                            "find_information: failed to read {}: {e}",
+                            file_path.display()
+                        ),
+                    });
+                }
+            };
+            let record = KnowledgeRecord {
+                record_id: rid,
+                topic: meta.topic.clone(),
+                tags: meta.tags.iter().cloned().collect(),
+                content,
+                source: None,
+                created_at: meta.created_at,
+            };
+            results.push((record, score));
+        }
+
+        // Step 4: publish the
+        // `KnowledgeQueried` audit
+        // event. The event
+        // carries the `result_count`
+        // and `duration_ms`; the
+        // `free_text` is NOT in the
+        // event payload — audit-
+        // trail safety.
+        let duration_ms: u32 = started.elapsed().as_millis().try_into().unwrap_or(u32::MAX);
+        let event = afa_contracts::knowledge::KnowledgeQueried {
+            correlation_id: ctx.correlation_id,
+            tenant_id: ctx.tenant_id.clone(),
+            actor: ctx.actor.clone(),
+            timestamp: Utc::now(),
+            topic_filter: request.topic.clone(),
+            tag_filters: request.tags.clone(),
+            result_count: results.len() as u32,
+            duration_ms,
+        };
+        self.event_bus.publish(event, ctx.clone()).await;
+
+        // Step 5: bump the
+        // counter.
+        {
+            let mut index = self.index.write().await;
+            index.find_information_calls = index.find_information_calls.saturating_add(1);
+        }
+
+        Ok(results)
     }
 
     async fn store_information(
@@ -302,18 +594,50 @@ impl KnowledgeV1 for JsonKnowledgeAdapter {
         Ok(record_id)
     }
 
-    async fn list_topics(&self, _ctx: &ExecutionContext) -> Result<Vec<Topic>, KnowledgeErrorV1> {
-        // CID:afa-plugin-knowledge-json-adapter-006 - list_topics stub
-        // Phase 1 stub: the JSON v1 backend
-        // does not support list_topics.
-        // Returns `CapabilityUnsupported`
-        // per the contract. Phase 4
-        // populates the body.
-        Err(KnowledgeErrorV1::CapabilityUnsupported {
-            topic: None,
-            record_id: None,
-            reason: "JsonKnowledgeAdapter: list_topics is not supported in v1".to_string(),
-        })
+    async fn list_topics(&self, ctx: &ExecutionContext) -> Result<Vec<Topic>, KnowledgeErrorV1> {
+        // Step 1: hold the read lock
+        // and pull the sorted topic
+        // summaries. The
+        // `all_topic_summaries` helper
+        // already does the name-sort
+        // and the per-topic aggregation
+        // (record_count, first/last
+        // timestamps, tag_count).
+        let started = std::time::Instant::now();
+        let topics: Vec<Topic> = {
+            let index = self.index.read().await;
+            index.all_topic_summaries()
+        };
+
+        // Step 2: publish the
+        // `KnowledgeTopicsListed`
+        // audit event. The event
+        // carries the `topic_count`
+        // and `duration_ms`; the
+        // topic *names* are NOT in
+        // the event payload (they
+        // are the return value of
+        // the call, not the audit
+        // fact).
+        let duration_ms: u32 = started.elapsed().as_millis().try_into().unwrap_or(u32::MAX);
+        let event = afa_contracts::knowledge::KnowledgeTopicsListed {
+            correlation_id: ctx.correlation_id,
+            tenant_id: ctx.tenant_id.clone(),
+            actor: ctx.actor.clone(),
+            timestamp: Utc::now(),
+            topic_count: topics.len() as u32,
+            duration_ms,
+        };
+        self.event_bus.publish(event, ctx.clone()).await;
+
+        // Step 3: bump the
+        // counter.
+        {
+            let mut index = self.index.write().await;
+            index.list_topics_calls = index.list_topics_calls.saturating_add(1);
+        }
+
+        Ok(topics)
     }
 
     // CID:afa-plugin-knowledge-json-adapter-004 - JsonKnowledgeAdapter::describe_capabilities

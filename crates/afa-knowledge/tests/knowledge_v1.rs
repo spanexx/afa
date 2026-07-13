@@ -1,57 +1,103 @@
-//! Code Map: knowledge_v1 tests
+//! Code Map: `afa-knowledge/tests/knowledge_v1.rs`
+//! - The single conformance-suite
+//!   integration test. Runs the
+//!   `run_conformance_suite` from
+//!   `afa_knowledge::conformance`
+//!   against a `MockAdapter` and
+//!   asserts the call log shows the
+//!   expected call shape (one
+//!   `store_information`, one
+//!   `find_information`, one
+//!   `list_topics`).
 //!
-//! Phase 0 test binary for the Knowledge V1
-//! conformance suite. The `cargo test` run for
-//! `afa-knowledge` is `cargo test -p
-//! afa-knowledge`. Phase 0: this binary contains
-//! a single trivial test that exercises the
-//! trait object type and the re-exports; the
-//! real conformance cases land in Phase 2.
-//!
-//! Story (plain English): The test binary is the
-//! place the conformance suite will live. The
-//! `MockAdapter` (the canonical mock) will sit
-//! in `tests/common/mod.rs` and the per-method
-//! cases will be `#[tokio::test]` functions that
-//! build a `MockAdapter`, register it with the
-//! suite, and assert on the observable behavior.
-//! Phase 0 only proves the suite signature
-//! compiles and the trait compiles behind
-//! `Arc<dyn KnowledgeV1>`.
+//! Story (plain English): The
+//! conformance suite is the safety
+//! net. The integration test in
+//! `afa-knowledge/tests/` runs the
+//! suite against the canonical
+//! `MockAdapter` (the simplest
+//! possible `KnowledgeV1` impl). A
+//! future contributor who breaks the
+//! contract — by changing the method
+//! signature, adding a required
+//! field, etc. — would be forced to
+//! update this test.
 //!
 //! CID Index:
-//! CID:afa-knowledge-tests-001 -> knowledge_v1_trait_object_can_be_typed
+//! CID:afa-knowledge-tests-knowledge-v1-001 -> knowledge_v1 conformance test
 //!
-//! Quick lookup: rg -n "CID:afa-knowledge-tests-" crates/afa-knowledge/tests/knowledge_v1.rs
+//! Quick lookup: rg -n "CID:afa-knowledge-tests-knowledge-v1-" crates/afa-knowledge/tests/knowledge_v1.rs
 
-use afa_knowledge::{KnowledgeV1, Topic};
 use std::sync::Arc;
 
-#[tokio::test]
-async fn knowledge_v1_trait_object_can_be_typed() {
-    // Phase 0 proof that the trait is
-    // object-safe and the `Arc<dyn KnowledgeV1>`
-    // type the registry will use compiles. The
-    // function `_assert_object_safe` is a
-    // compile-only check (Rust will fail to
-    // compile the body if the trait is not
-    // object-safe, e.g. if a method took `self`
-    // by value or had a generic type parameter).
-    // A future contributor who makes the trait
-    // non-object-safe would be forced to remove
-    // this test or change the trait.
-    fn _assert_object_safe(_a: Arc<dyn KnowledgeV1>) {}
+use afa_contracts::{
+    execution_context::Actor, ids::TenantId, ExecutionContext, FindInformationRequest,
+    KnowledgeRecordInput, KnowledgeV1,
+};
+use afa_knowledge::{run_conformance_suite, MockAdapter, MockCall};
 
-    // Also exercise the `Topic` re-export so
-    // the `cargo test` run is not "0 tests
-    // run" in Phase 0 (a CI dashboard that
-    // shows "0 tests" for a brand-new crate
-    // looks like a packaging mistake).
-    let _t = Topic {
-        name: "FAQ".into(),
-        record_count: 0,
-        first_record_at: None,
-        last_record_at: None,
-        tag_count: 0,
-    };
+// CID:afa-knowledge-tests-knowledge-v1-001 - knowledge_v1 test
+// Purpose: Run the contract-conformance
+// suite against the `MockAdapter`
+// and assert the call log shows
+// exactly one call per method
+// (the suite's happy path). The
+// test keeps a `Arc<MockAdapter>`
+// reference so the call-log
+// assertion does not need a
+// downcast.
+#[tokio::test]
+async fn knowledge_v1_conformance_suite_against_mock() {
+    // Build a `MockAdapter` and
+    // hold it in two `Arc`s:
+    // one as the trait object
+    // (the suite's signature
+    // requires `Arc<dyn
+    // KnowledgeV1>`), one as
+    // the concrete type
+    // (for the call-log
+    // assertion). The two
+    // `Arc`s point to the
+    // same allocation; the
+    // `call_log` lives on the
+    // concrete type.
+    let mock_arc: Arc<MockAdapter> = Arc::new(MockAdapter::new());
+    let trait_arc: Arc<dyn KnowledgeV1> = mock_arc.clone();
+    run_conformance_suite(trait_arc).await;
+    let log = mock_arc.call_log();
+    assert_eq!(log.len(), 3, "suite must make exactly 3 method calls");
+    assert!(matches!(log[0], MockCall::Store(_)));
+    assert!(matches!(log[1], MockCall::Find(_)));
+    assert!(matches!(log[2], MockCall::List));
+}
+
+// A separate test that exercises
+// the `MockAdapter` directly to
+// confirm the call log records the
+// right shape.
+#[tokio::test]
+async fn mock_adapter_records_call_shape() {
+    let mock_arc: Arc<MockAdapter> = Arc::new(MockAdapter::new());
+    let adapter: Arc<dyn KnowledgeV1> = mock_arc.clone();
+    let ctx = ExecutionContext::new(TenantId::new("c"), Actor::Timer);
+    adapter
+        .store_information(
+            KnowledgeRecordInput {
+                topic: "FAQ".to_string(),
+                tags: vec![],
+                content: "x".to_string(),
+                source: None,
+            },
+            &ctx,
+        )
+        .await
+        .unwrap();
+    adapter
+        .find_information(FindInformationRequest::default(), &ctx)
+        .await
+        .unwrap();
+    adapter.list_topics(&ctx).await.unwrap();
+
+    let log = mock_arc.call_log();
+    assert_eq!(log.len(), 3);
 }
