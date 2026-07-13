@@ -35,7 +35,7 @@
 //! FREELLMAPI_URL="http://localhost:3001/v1" \
 //! FREELLMAPI_MODEL="auto" \
 //! FREELLMAPI_KEY="..." \
-//! cargo run --example negative_battery_smoke -p afa-plugin-llm-openai-compat
+//! cargo run --example negative_battery_smoke -p afa-plugin-llm-chat-completions
 //! ```
 //!
 //! Exits 0 if all 6 cases match, 1 if any case lands in an
@@ -66,9 +66,9 @@
 //! fake one (wiremock-rs).
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-example-002 -> negative_battery_smoke
+//! CID:afa-plugin-llm-chat-completions-example-002 -> negative_battery_smoke
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-example-" crates/afa-plugin-llm-openai-compat/examples/
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-example-" crates/afa-plugin-llm-chat-completions/examples/
 
 use std::env;
 use std::sync::Arc;
@@ -80,8 +80,8 @@ use afa_contracts::{
     LlmErrorV1, LlmV1, ModelCapabilities, SamplingParams, SecretRef, SecurityErrorV1, SecurityV1,
     UnsealedSecret,
 };
-use afa_plugin_llm_openai_compat::adapter::ChatCompletionsAdapter;
-use afa_plugin_llm_openai_compat::config::ChatCompletionsConfig;
+use afa_plugin_llm_chat_completions::adapter::ChatCompletionsAdapter;
+use afa_plugin_llm_chat_completions::config::ChatCompletionsConfig;
 use async_trait::async_trait;
 
 // ---------------------------------------------------------------------------

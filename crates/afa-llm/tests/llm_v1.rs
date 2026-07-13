@@ -3,7 +3,7 @@
 //!   The `MockAdapter` (an `Arc<dyn LlmV1>`) must pass
 //!   the conformance suite. The dyn-compat is the
 //!   load-bearing piece: every adapter (the real
-//!   `OpenAiAdapter`, a future Claude one, a
+//!   `ResponsesAdapter`, a future Claude one, a
 //!   mock) is held behind `Arc<dyn LlmV1>` in
 //!   `CapabilityRegistry`. If the trait is not
 //!   dyn-compatible, the registry's slot breaks.

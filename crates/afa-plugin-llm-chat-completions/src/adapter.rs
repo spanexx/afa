@@ -3,7 +3,7 @@
 //!   adapter for any service that speaks the OpenAI
 //!   Chat Completions wire format (`POST
 //!   {base_url}/chat/completions`). This is
-//!   intentionally separate from `OpenAiAdapter` in
+//!   intentionally separate from `ResponsesAdapter` in
 //!   `afa-plugin-llm-http` (which targets the new
 //!   OpenAI Responses API at `/v1/responses`). The
 //!   two are sibling adapters; the difference is the
@@ -28,9 +28,9 @@
 //! — without reading the question or the answer.
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-adapter-001 -> ChatCompletionsAdapter
+//! CID:afa-plugin-llm-chat-completions-adapter-001 -> ChatCompletionsAdapter
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-adapter-" crates/afa-plugin-llm-openai-compat/src/adapter.rs
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-adapter-" crates/afa-plugin-llm-chat-completions/src/adapter.rs
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -39,16 +39,16 @@ use async_trait::async_trait;
 
 use afa_bus::EventBusHandle;
 use afa_contracts::{
-    CompletionCompleted, CompletionFailed, CompletionRequest, CompletionResponse, CompletionStream,
-    ConversationItem, ExecutionContext, FinishReason, LlmErrorV1, LlmV1, ModelCapabilities,
-    SecurityV1, ToolCallRequest, ToolDefinition, Usage,
+    CompletionChunk, CompletionCompleted, CompletionFailed, CompletionRequest, CompletionResponse,
+    CompletionStream, ConversationItem, ExecutionContext, FinishReason, LlmErrorV1, LlmV1,
+    ModelCapabilities, SecurityV1, ToolCallRequest, ToolDefinition, Usage,
 };
 use chrono::Utc;
 
 use super::config::ChatCompletionsConfig;
 use super::key_wiring::UnsealedHolder;
 
-// CID:afa-plugin-llm-openai-compat-adapter-001 - ChatCompletionsAdapter
+// CID:afa-plugin-llm-chat-completions-adapter-001 - ChatCompletionsAdapter
 // Purpose: The concrete `LlmV1` adapter for any
 // service that speaks the OpenAI Chat Completions
 // wire format. The adapter is hard-wired to one
@@ -416,18 +416,97 @@ impl LlmV1 for ChatCompletionsAdapter {
         }
     }
 
+    // CID:afa-plugin-llm-chat-completions-adapter-004 - stream_complete
+    // Purpose: Phase 2 streaming entry
+    // point. The full wire logic lives
+    // in `streaming.rs` (the
+    // `tokio::spawn` background task,
+    // the SSE event mapper, the 401
+    // retry, the cancellation paths).
+    // This method does the four
+    // top-level things a caller
+    // expects:
+    //  1. Publish `CompletionRequested`
+    //     FIRST (before any I/O).
+    //  2. Build the request body with
+    //     `"stream": true` injected.
+    //  3. Unseal the initial key (the
+    //     first call uses the cached
+    //     value; the bg task re-unseals
+    //     on 401).
+    //  4. Open a bounded
+    //     `mpsc::channel(64)`,
+    //     `tokio::spawn` the bg task
+    //     (which holds one `tx` clone
+    //     and the `request` context),
+    //     and — if `ctx.deadline` is
+    //     `Some(_)` — spawn the
+    //     deadline watchdog (which
+    //     holds a second `tx` clone
+    //     and drops it on timeout).
+    //     The consumer's `rx` is
+    //     returned.
+    // Used by: any workflow that calls
+    // `llm.stream_complete`; the
+    // `CapabilityRegistry` does not
+    // dispatch streaming calls.
     async fn stream_complete(
         &self,
-        _request: CompletionRequest,
-        _ctx: &ExecutionContext,
+        request: CompletionRequest,
+        ctx: &ExecutionContext,
     ) -> Result<CompletionStream, LlmErrorV1> {
-        // Streaming is in Phase 2 (not
-        // Phase 1.5). For now, return an
-        // error so callers know it's not
-        // implemented yet.
-        Err(LlmErrorV1::Internal {
-            reason: "stream_complete is not implemented in Phase 1.5 (deferred to Phase 2)".into(),
-        })
+        // Step 1: publish the
+        // `CompletionRequested` audit
+        // event. Always first.
+        self.publish_requested(&request, ctx).await;
+        let start = Instant::now();
+
+        // Step 2: build the request body
+        // (same shape as `complete`),
+        // then add `"stream": true`.
+        let mut body = map_request(&request, &self.config.model)?;
+        body["stream"] = serde_json::Value::Bool(true);
+
+        // Step 3: unseal the initial key.
+        // On failure we return the
+        // error — the bg task is not
+        // started in this case.
+        let key = self.key_holder.get_or_unseal(ctx).await?;
+        let initial_auth = format!("Bearer {key}");
+
+        // Step 4: open the channel +
+        // spawn the bg task + spawn
+        // the deadline watchdog.
+        let (tx, rx) = tokio::sync::mpsc::channel::<CompletionChunk>(64);
+        super::streaming::spawn_streaming(
+            self.config.clone(),
+            // The bg task gets a
+            // fresh `Arc` clone of
+            // the security engine
+            // (the adapter's
+            // field is
+            // `UnsealedHolder`,
+            // not the raw
+            // engine).
+            self.key_holder.share_security_arc(),
+            self.bus.clone(),
+            ctx.clone(),
+            body,
+            initial_auth,
+            start,
+            tx.clone(),
+        );
+        if let Some(deadline) = ctx.deadline {
+            let tx_watchdog = tx.clone();
+            tokio::spawn(async move {
+                let now = std::time::Instant::now();
+                if deadline > now {
+                    tokio::time::sleep(deadline - now).await;
+                }
+                drop(tx_watchdog);
+            });
+        }
+        Ok(rx)
     }
 
     fn describe_capabilities(&self) -> ModelCapabilities {
@@ -555,7 +634,7 @@ async fn call_vendor(
 /// `context_length_exceeded`) are
 /// detected from the JSON body's
 /// `error.code` field.
-fn map_http_error(status: u16, body: &[u8], model: &str) -> LlmErrorV1 {
+pub(crate) fn map_http_error(status: u16, body: &[u8], model: &str) -> LlmErrorV1 {
     let parsed: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
     let code = parsed["error"]["code"].as_str().unwrap_or("");
     let msg = parsed["error"]["message"]

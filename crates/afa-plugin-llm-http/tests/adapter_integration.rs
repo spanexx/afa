@@ -1,4 +1,4 @@
-//! Code Map: wiremock-based integration tests for `OpenAiAdapter`
+//! Code Map: wiremock-based integration tests for `ResponsesAdapter`
 //! - `flow_2_text_reply_returns_textreply_and_two_events`:
 //!   wiremock-rs returns a canned `Response` JSON;
 //!   the adapter returns `TextReply` with the canned
@@ -37,7 +37,7 @@
 //!
 //! Implementation note (per-adapter base URL):
 //! The adapter captures the vendor base URL in
-//! its `OpenAiConfig::base_url` field at
+//! its `ResponsesConfig::base_url` field at
 //! construction time. Earlier versions of this
 //! test file used the `AFA_OPENAI_BASE_URL` env
 //! var — that approach races between parallel
@@ -46,7 +46,7 @@
 //! own `set_var` and the adapter's
 //! `std::env::var` read inside `new`). The
 //! config-based approach is atomic per-adapter:
-//! each test builds its own `OpenAiConfig` with
+//! each test builds its own `ResponsesConfig` with
 //! its own `wiremock` server URI, and the
 //! adapter is forever bound to that URI.
 //!
@@ -86,8 +86,8 @@ use afa_contracts::{
     ConversationItem, ExecutionContext, LlmErrorV1, LlmV1, SecretRef, SecurityErrorV1, SecurityV1,
     UnsealedSecret,
 };
-use afa_plugin_llm_http::config::OpenAiConfig;
-use afa_plugin_llm_http::openai_adapter::OpenAiAdapter;
+use afa_plugin_llm_http::config::ResponsesConfig;
+use afa_plugin_llm_http::responses_adapter::ResponsesAdapter;
 use async_trait::async_trait;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -99,7 +99,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// A canned OpenAI Responses API
 /// success body. The `output[*].type ==
 /// "message"` shape is what
-/// `OpenAiAdapter::map_response`
+/// `ResponsesAdapter::map_response`
 /// looks for; the `usage.input_tokens`
 /// / `output_tokens` is what
 /// `parse_usage` looks for; the
@@ -127,7 +127,7 @@ const TEXT_REPLY_BODY: &str = r#"{
 /// success body for the tool-call
 /// branch. The `output[*].type ==
 /// "tool_call"` shape is what
-/// `OpenAiAdapter::map_response`
+/// `ResponsesAdapter::map_response`
 /// looks for.
 const TOOL_CALL_BODY: &str = r#"{
     "id": "resp_test_tc",
@@ -271,30 +271,30 @@ fn request_with_marker_prompt() -> CompletionRequest {
     }
 }
 
-/// Build an `OpenAiConfig` whose
+/// Build an `ResponsesConfig` whose
 /// `model` is `gpt-4o` and whose
 /// `base_url` is the given wiremock
 /// server URI. The adapter is
 /// hard-bound to this URL via the
-/// `OpenAiConfig::base_url` field (see
+/// `ResponsesConfig::base_url` field (see
 /// the file-level note on per-adapter
 /// base URLs).
-fn config_with_base_url(base_url: &str) -> OpenAiConfig {
-    OpenAiConfig::gpt_4o_with_base_url(key_ref(), base_url)
+fn config_with_base_url(base_url: &str) -> ResponsesConfig {
+    ResponsesConfig::responses_gpt_4o_with_base_url(key_ref(), base_url)
 }
 
-/// Build a fresh `OpenAiAdapter`
+/// Build a fresh `ResponsesAdapter`
 /// with a fresh `EventBus`. Returns
 /// the bus (so the test can
 /// subscribe to events), the
 /// adapter, and a context. The
 /// adapter is hard-bound to the
 /// given base URL.
-fn build_adapter(base_url: &str) -> (EventBus, OpenAiAdapter, ExecutionContext) {
+fn build_adapter(base_url: &str) -> (EventBus, ResponsesAdapter, ExecutionContext) {
     build_adapter_with_security(base_url, Arc::new(FakeSecurity))
 }
 
-/// Build a fresh `OpenAiAdapter`
+/// Build a fresh `ResponsesAdapter`
 /// with a custom `SecurityV1`.
 /// Returns the bus, the adapter,
 /// and a context. The adapter is
@@ -302,9 +302,9 @@ fn build_adapter(base_url: &str) -> (EventBus, OpenAiAdapter, ExecutionContext) 
 fn build_adapter_with_security(
     base_url: &str,
     security: Arc<dyn SecurityV1>,
-) -> (EventBus, OpenAiAdapter, ExecutionContext) {
+) -> (EventBus, ResponsesAdapter, ExecutionContext) {
     let bus = EventBus::new();
-    let adapter = OpenAiAdapter::new(config_with_base_url(base_url), security, bus.handle());
+    let adapter = ResponsesAdapter::new(config_with_base_url(base_url), security, bus.handle());
     let ctx = ExecutionContext::new(
         afa_contracts::TenantId::new("adapter_integration_test"),
         afa_contracts::Actor::Timer,
@@ -599,7 +599,7 @@ async fn flow_9_context_length_exceeded_carries_token_counts() {
 /// server that returns the given
 /// `(status, body)` pair for every
 /// POST to `/v1/responses`, and
-/// build a fresh `OpenAiAdapter`
+/// build a fresh `ResponsesAdapter`
 /// pointing at it. The adapter is
 /// hard-bound to the wiremock
 /// server's URI via its config
@@ -635,7 +635,7 @@ async fn flow_9_context_length_exceeded_carries_token_counts() {
 async fn adapter_against_status_body(
     status: u16,
     body: &str,
-) -> (MockServer, OpenAiAdapter, ExecutionContext) {
+) -> (MockServer, ResponsesAdapter, ExecutionContext) {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/responses"))

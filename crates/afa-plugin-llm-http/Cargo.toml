@@ -20,6 +20,14 @@ serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 zeroize = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# SSE parser for `stream_complete` (Phase 2).
+# The `Response::bytes_stream()` is wrapped
+# in `.eventsource()` to yield typed SSE
+# events.
+eventsource-stream = { workspace = true }
+# `StreamExt::next` for iterating the SSE
+# stream inside the background task.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 wiremock = "0.6"

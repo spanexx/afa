@@ -5,7 +5,7 @@
 //!   identical to the one in `afa-plugin-llm-http`
 //!   (cache, retry on 401, zeroize on drop) — the
 //!   only difference is the config type
-//!   (`ChatCompletionsConfig` here, `OpenAiConfig`
+//!   (`ChatCompletionsConfig` here, `ResponsesConfig`
 //!   there). See the doc on the
 //!   `UnsealedHolder` in
 //!   `crates/afa-plugin-llm-http/src/key_wiring.rs`
@@ -25,11 +25,11 @@
 //! required.
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-key-001 -> UnsealedHolder
-//! CID:afa-plugin-llm-openai-compat-key-002 -> get_or_unseal
-//! CID:afa-plugin-llm-openai-compat-key-003 -> re_unseal_after_401
+//! CID:afa-plugin-llm-chat-completions-key-001 -> UnsealedHolder
+//! CID:afa-plugin-llm-chat-completions-key-002 -> get_or_unseal
+//! CID:afa-plugin-llm-chat-completions-key-003 -> re_unseal_after_401
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-key-" crates/afa-plugin-llm-openai-compat/src/key_wiring.rs
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-key-" crates/afa-plugin-llm-chat-completions/src/key_wiring.rs
 
 use std::sync::Arc;
 
@@ -38,7 +38,7 @@ use zeroize::Zeroize;
 
 use super::config::ChatCompletionsConfig;
 
-// CID:afa-plugin-llm-openai-compat-key-001 - UnsealedHolder
+// CID:afa-plugin-llm-chat-completions-key-001 - UnsealedHolder
 // Purpose: A small struct that holds the
 // unsealed API key in memory, behind a
 // `tokio::sync::Mutex`. The pattern has 3
@@ -88,7 +88,7 @@ impl UnsealedHolder {
         }
     }
 
-    // CID:afa-plugin-llm-openai-compat-key-002 - get_or_unseal
+    // CID:afa-plugin-llm-chat-completions-key-002 - get_or_unseal
     // Purpose: Step 1 of the 3-step pattern.
     // Returns the cached key if it exists;
     // otherwise unseals via the security
@@ -165,7 +165,7 @@ impl UnsealedHolder {
         Ok(guard.as_ref().expect("just inserted").clone())
     }
 
-    // CID:afa-plugin-llm-openai-compat-key-003 - re_unseal_after_401
+    // CID:afa-plugin-llm-chat-completions-key-003 - re_unseal_after_401
     // Purpose: Step 3 of the 3-step pattern.
     // Drops the cached key and re-unseals.
     // Called when the vendor returns HTTP
@@ -196,6 +196,23 @@ impl UnsealedHolder {
         // will see `None` and go
         // through the slow path.
         self.get_or_unseal(ctx).await
+    }
+
+    /// Expose the underlying
+    /// `SecurityV1` engine as an
+    /// `Arc` so callers (the
+    /// streaming bg task) can use
+    /// it without going through
+    /// the holder's cache. The
+    /// streaming path is a single
+    /// round-trip so caching the
+    /// key in the holder is
+    /// pointless; a fresh
+    /// `unseal()` keeps the
+    /// plaintext in a different
+    /// zeroize-on-drop scope.
+    pub fn share_security_arc(&self) -> Arc<dyn SecurityV1> {
+        self.security.clone()
     }
 }
 

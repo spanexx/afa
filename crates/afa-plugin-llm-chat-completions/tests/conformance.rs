@@ -22,9 +22,9 @@
 //! drill expects for that case.
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-conformance-001 -> run_suite_against_real_adapter
+//! CID:afa-plugin-llm-chat-completions-conformance-001 -> run_suite_against_real_adapter
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-conformance-" crates/afa-plugin-llm-openai-compat/tests/
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-conformance-" crates/afa-plugin-llm-chat-completions/tests/
 
 use std::sync::Arc;
 
@@ -36,8 +36,8 @@ use afa_contracts::{
 };
 use afa_llm::conformance::run_conformance_suite;
 use afa_llm::mock_adapter::{FailureCase, MockAdapter};
-use afa_plugin_llm_openai_compat::adapter::ChatCompletionsAdapter;
-use afa_plugin_llm_openai_compat::config::ChatCompletionsConfig;
+use afa_plugin_llm_chat_completions::adapter::ChatCompletionsAdapter;
+use afa_plugin_llm_chat_completions::config::ChatCompletionsConfig;
 use async_trait::async_trait;
 use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -120,7 +120,7 @@ fn basic_caps() -> ModelCapabilities {
     }
 }
 
-// CID:afa-plugin-llm-openai-compat-conformance-001
+// CID:afa-plugin-llm-chat-completions-conformance-001
 #[tokio::test]
 async fn run_suite_against_real_adapter_passes_all_8_cases() {
     // The conformance suite has 8

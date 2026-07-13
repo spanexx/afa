@@ -11,8 +11,8 @@
 //!   zeros (via `zeroize::Zeroize`).
 //!
 //! Story (plain English): The `UnsealedHolder` is the
-//! small lockbox the OpenAI specialist wears on their
-//! belt. The first time they need the API key, they
+//! small lockbox the Responses-API specialist wears on
+//! their belt. The first time they need the API key, they
 //! ask the security guard for it (the guard opens the
 //! sealed envelope and hands the specialist a copy).
 //! The specialist keeps the copy in the lockbox and
@@ -42,7 +42,7 @@ use std::sync::Arc;
 use afa_contracts::{ExecutionContext, LlmErrorV1, SecurityV1};
 use zeroize::Zeroize;
 
-use super::config::OpenAiConfig;
+use super::config::ResponsesConfig;
 
 // CID:afa-plugin-llm-http-key-001 - UnsealedHolder
 // Purpose: A small struct that holds the unsealed
@@ -61,7 +61,7 @@ use super::config::OpenAiConfig;
 // with zeros (via `zeroize::Zeroize`).
 // Uses: SecurityV1 (the engine the holder
 // delegates to), ExecutionContext, UnsealedSecret.
-// Used by: OpenAiAdapter (the holder is the
+// Used by: ResponsesAdapter (the holder is the
 // adapter's field, used in `complete` and
 // `stream_complete`).
 pub struct UnsealedHolder {
@@ -73,7 +73,7 @@ pub struct UnsealedHolder {
     security: Arc<dyn SecurityV1>,
     /// The static config (carries the
     /// `key_name`).
-    config: OpenAiConfig,
+    config: ResponsesConfig,
     /// The cached unsealed key. `None` until
     /// `get_or_unseal` is called for the
     /// first time.
@@ -85,7 +85,7 @@ impl UnsealedHolder {
     /// `cached` slot starts empty; the first
     /// call to `get_or_unseal` performs the
     /// unseal.
-    pub fn new(security: Arc<dyn SecurityV1>, config: OpenAiConfig) -> Self {
+    pub fn new(security: Arc<dyn SecurityV1>, config: ResponsesConfig) -> Self {
         Self {
             security,
             config,
@@ -106,7 +106,7 @@ impl UnsealedHolder {
     // compiler can prove is zeroized).
     // Uses: SecurityV1, ExecutionContext,
     // SecretRef.
-    // Used by: OpenAiAdapter (the first
+    // Used by: ResponsesAdapter (the first
     // line of every request).
     pub async fn get_or_unseal(&self, ctx: &ExecutionContext) -> Result<String, LlmErrorV1> {
         // Fast path: the cache is warm.
@@ -130,7 +130,7 @@ impl UnsealedHolder {
         // name string. The operator pre-
         // seals the API key at startup,
         // captures the `SecretRef`, and
-        // passes it via `OpenAiConfig`.
+        // passes it via `ResponsesConfig`.
         let mut guard = self.cached.lock().await;
         if guard.is_none() {
             let secret = self
@@ -178,7 +178,7 @@ impl UnsealedHolder {
     // engine's storage now holds a new
     // sealed value).
     // Uses: SecurityV1, ExecutionContext.
-    // Used by: OpenAiAdapter (in the 401
+    // Used by: ResponsesAdapter (in the 401
     // retry branch of `complete`).
     pub async fn re_unseal_after_401(&self, ctx: &ExecutionContext) -> Result<String, LlmErrorV1> {
         // Step 1: drop the cached
@@ -199,6 +199,23 @@ impl UnsealedHolder {
         // will see `None` and go
         // through the slow path.
         self.get_or_unseal(ctx).await
+    }
+
+    /// Expose the underlying
+    /// `SecurityV1` engine as an
+    /// `Arc` so callers (the
+    /// streaming bg task) can use
+    /// it without going through
+    /// the holder's cache. The
+    /// streaming path is a single
+    /// round-trip so caching the
+    /// key in the holder is
+    /// pointless; a fresh
+    /// `unseal()` keeps the
+    /// plaintext in a different
+    /// zeroize-on-drop scope.
+    pub fn share_security_arc(&self) -> Arc<dyn SecurityV1> {
+        self.security.clone()
     }
 }
 
@@ -230,7 +247,7 @@ impl Drop for UnsealedHolder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::OpenAiConfig;
+    use crate::config::ResponsesConfig;
     use afa_contracts::UnsealedSecret;
     use afa_contracts::{Actor, SecretRef, SecurityErrorV1, TenantId};
     use async_trait::async_trait;
@@ -301,7 +318,10 @@ mod tests {
         let security = Arc::new(FakeSecurity {
             new_calls: std::sync::Mutex::new(0),
         });
-        let holder = UnsealedHolder::new(security.clone(), OpenAiConfig::gpt_4o(key_ref()));
+        let holder = UnsealedHolder::new(
+            security.clone(),
+            ResponsesConfig::responses_gpt_4o(key_ref()),
+        );
         let s1 = holder.get_or_unseal(&ctx()).await.expect("v1");
         assert_eq!(s1, "sk-v1");
         let s2 = holder.get_or_unseal(&ctx()).await.expect("cached");
@@ -326,7 +346,10 @@ mod tests {
         let security = Arc::new(FakeSecurity {
             new_calls: std::sync::Mutex::new(0),
         });
-        let holder = UnsealedHolder::new(security.clone(), OpenAiConfig::gpt_4o(key_ref()));
+        let holder = UnsealedHolder::new(
+            security.clone(),
+            ResponsesConfig::responses_gpt_4o(key_ref()),
+        );
         let s1 = holder.get_or_unseal(&ctx()).await.expect("v1");
         assert_eq!(s1, "sk-v1");
         let s2 = holder.re_unseal_after_401(&ctx()).await.expect("v2");

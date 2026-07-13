@@ -8,5 +8,14 @@ members = [
     "crates/afa-security",
     "crates/afa-llm",
     "crates/afa-plugin-llm-http",
-    "crates/afa-plugin-llm-openai-compat",
+    "crates/afa-plugin-llm-chat-completions",
 ]
+
+[workspace.dependencies]
+# SSE (Server-Sent Events) parser used by
+# the streaming adapters (`stream_complete`).
+# The `Stream<Item = Result<Bytes, _>>` of a
+# reqwest response is `.eventsource()`-ed into
+# a `Stream<Item = Result<Event, _>>` of typed
+# SSE events.
+eventsource-stream = "0.2"

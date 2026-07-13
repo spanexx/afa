@@ -27,23 +27,23 @@
 //! reads to answer "which vendor answered this customer?".
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-config-001 -> ChatCompletionsConfig
+//! CID:afa-plugin-llm-chat-completions-config-001 -> ChatCompletionsConfig
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-config-" crates/afa-plugin-llm-openai-compat/src/config.rs
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-config-" crates/afa-plugin-llm-chat-completions/src/config.rs
 
 use afa_contracts::{ModelCapabilities, SecretRef};
 
 /// The production OpenAI Chat Completions API
 /// base URL. The adapter appends `/chat/completions`
 /// to this when building the request URL. The
-/// `https://api.openai.com` host is the canonical
+/// `https://api.openai.com/v1` host is the canonical
 /// OpenAI Chat Completions endpoint; the same path
 /// shape works for every other OpenAI-compatible
 /// service (Groq, Cerebras, Ollama's `/v1` shim,
 /// llama.cpp's server, LM Studio, vLLM, etc.).
-pub const OPENAI_CHAT_PROD_BASE_URL: &str = "https://api.openai.com/v1";
+pub const OPENAI_CHAT_COMPLETIONS_BASE_URL: &str = "https://api.openai.com/v1";
 
-// CID:afa-plugin-llm-openai-compat-config-001 - ChatCompletionsConfig
+// CID:afa-plugin-llm-chat-completions-config-001 - ChatCompletionsConfig
 // Purpose: The static, immutable config the
 // adapter is built from. Carries the model name
 // (e.g. `"gpt-4o-mini"`, `"llama-3.1-70b"`,
@@ -111,7 +111,7 @@ pub struct ChatCompletionsConfig {
     /// A human-readable name for the
     /// provider (e.g. `"freellmapi"`,
     /// `"groq"`, `"ollama-local"`,
-    /// `"openai-prod"`). Lands on every
+    /// `"chat-completions-prod"`). Lands on every
     /// audit event so a dashboard can
     /// group calls by provider, not just
     /// by model. Two different providers
@@ -131,7 +131,7 @@ impl ChatCompletionsConfig {
     /// The `key_ref` must already point to a
     /// sealed API key in the security engine.
     /// `provider_name` defaults to
-    /// `"openai-prod"` for dashboards.
+    /// `"chat-completions-prod"` for dashboards.
     pub fn gpt_4o_mini(key_ref: SecretRef) -> Self {
         Self::with_provider(
             "gpt-4o-mini",
@@ -141,8 +141,8 @@ impl ChatCompletionsConfig {
                 supports_vision: false,
                 supports_tool_use: true,
             },
-            OPENAI_CHAT_PROD_BASE_URL,
-            "openai-prod",
+            OPENAI_CHAT_COMPLETIONS_BASE_URL,
+            "chat-completions-prod",
         )
     }
 
@@ -187,7 +187,7 @@ mod tests {
         // cap numbers here is changing the
         // contract for every test in the file.
         let key_ref = SecretRef {
-            name: "openai-prod-key".into(),
+            name: "chat-completions-prod-key".into(),
             version: 1,
         };
         let c = ChatCompletionsConfig::gpt_4o_mini(key_ref.clone());
@@ -201,10 +201,10 @@ mod tests {
         // endpoint (note the `/v1` suffix —
         // the adapter appends
         // `/chat/completions`).
-        assert_eq!(c.base_url, OPENAI_CHAT_PROD_BASE_URL);
+        assert_eq!(c.base_url, OPENAI_CHAT_COMPLETIONS_BASE_URL);
         // The default `provider_name` is
-        // `openai-prod` for dashboards.
-        assert_eq!(c.provider_name, "openai-prod");
+        // `chat-completions-prod` for dashboards.
+        assert_eq!(c.provider_name, "chat-completions-prod");
     }
 
     #[test]

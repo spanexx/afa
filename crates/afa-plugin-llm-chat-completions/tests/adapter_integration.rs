@@ -60,15 +60,15 @@
 //! secrets" drill).
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-integration-001 -> flow_2_text_reply
-//! CID:afa-plugin-llm-openai-compat-integration-002 -> flow_7_re_unseal
-//! CID:afa-plugin-llm-openai-compat-integration-003 -> flow_8_rate_limited
-//! CID:afa-plugin-llm-openai-compat-integration-004 -> flow_9_context_length
-//! CID:afa-plugin-llm-openai-compat-integration-005 -> each_error_variant
-//! CID:afa-plugin-llm-openai-compat-integration-006 -> never_log_secrets
-//! CID:afa-plugin-llm-openai-compat-integration-007 -> freellmapi_style
+//! CID:afa-plugin-llm-chat-completions-integration-001 -> flow_2_text_reply
+//! CID:afa-plugin-llm-chat-completions-integration-002 -> flow_7_re_unseal
+//! CID:afa-plugin-llm-chat-completions-integration-003 -> flow_8_rate_limited
+//! CID:afa-plugin-llm-chat-completions-integration-004 -> flow_9_context_length
+//! CID:afa-plugin-llm-chat-completions-integration-005 -> each_error_variant
+//! CID:afa-plugin-llm-chat-completions-integration-006 -> never_log_secrets
+//! CID:afa-plugin-llm-chat-completions-integration-007 -> freellmapi_style
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-integration-" crates/afa-plugin-llm-openai-compat/tests/
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-integration-" crates/afa-plugin-llm-chat-completions/tests/
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -80,8 +80,8 @@ use afa_contracts::{
     ConversationItem, ExecutionContext, LlmErrorV1, LlmV1, SecretRef, SecurityErrorV1, SecurityV1,
     UnsealedSecret,
 };
-use afa_plugin_llm_openai_compat::adapter::ChatCompletionsAdapter;
-use afa_plugin_llm_openai_compat::config::ChatCompletionsConfig;
+use afa_plugin_llm_chat_completions::adapter::ChatCompletionsAdapter;
+use afa_plugin_llm_chat_completions::config::ChatCompletionsConfig;
 use async_trait::async_trait;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

@@ -29,7 +29,7 @@
 //! FREELLMAPI_URL="http://localhost:3001/v1" \
 //! FREELLMAPI_MODEL="auto" \
 //! FREELLMAPI_KEY="..." \
-//! cargo run --example real_provider_smoke -p afa-plugin-llm-openai-compat
+//! cargo run --example real_provider_smoke -p afa-plugin-llm-chat-completions
 //! ```
 //!
 //! ## Safety
@@ -54,9 +54,9 @@
 //! locally with `cargo run --example`).
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-example-001 -> real_provider_smoke
+//! CID:afa-plugin-llm-chat-completions-example-001 -> real_provider_smoke
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-example-" crates/afa-plugin-llm-openai-compat/examples/
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-example-" crates/afa-plugin-llm-chat-completions/examples/
 
 use std::env;
 use std::sync::Arc;
@@ -67,8 +67,8 @@ use afa_contracts::{
     ConversationItem, ExecutionContext, LlmErrorV1, LlmV1, ModelCapabilities, SecretRef,
     SecurityErrorV1, SecurityV1, UnsealedSecret,
 };
-use afa_plugin_llm_openai_compat::adapter::ChatCompletionsAdapter;
-use afa_plugin_llm_openai_compat::config::ChatCompletionsConfig;
+use afa_plugin_llm_chat_completions::adapter::ChatCompletionsAdapter;
+use afa_plugin_llm_chat_completions::config::ChatCompletionsConfig;
 use async_trait::async_trait;
 use chrono::Utc;
 
@@ -193,7 +193,7 @@ async fn main() {
                 "FREELLMAPI_URL is not set. Example usage:\n  \
                  FREELLMAPI_URL=http://localhost:3001/v1\n  \
                  FREELLMAPI_MODEL=auto\n  \
-                 FREELLMAPI_KEY=... cargo run --example real_provider_smoke -p afa-plugin-llm-openai-compat"
+                 FREELLMAPI_KEY=... cargo run --example real_provider_smoke -p afa-plugin-llm-chat-completions"
             );
             std::process::exit(2);
         }

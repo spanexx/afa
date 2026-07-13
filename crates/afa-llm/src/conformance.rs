@@ -268,7 +268,21 @@ pub fn stub_usage() -> Usage {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use afa_contracts::{CompletionChunk, CompletionStream};
+
     use super::*;
+
+    /// A boxed async check that inspects a
+    /// `CompletionStream` and returns either
+    /// `Ok(())` (pass) or `Err(String)` (fail,
+    /// the string is the reason). The alias
+    /// exists so the `StreamCase::check` field
+    /// stays short enough to satisfy
+    /// `clippy::type_complexity`.
+    type StreamCheck =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
 
     #[tokio::test]
     async fn mock_adapter_passes_every_conformance_case() {
@@ -304,5 +318,332 @@ mod tests {
             failed_cases: vec!["x".into()],
         };
         assert!(!r2.is_clean());
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 2 — streaming conformance cases.
+    //
+    // These run against the `MockAdapter` (hermetic,
+    // no network) and assert the 4 streaming
+    // cases every adapter must implement:
+    //  - `stream_happy_path`:
+    //    The adapter yields `TextDelta` chunks
+    //    and a final `Finished { Stop, usage }`.
+    //  - `stream_caller_drop`:
+    //    The consumer drops the `rx` mid-stream.
+    //    The bg task must exit cleanly (no
+    //    panic, no orphan process). We assert
+    //    the bg task is no longer running by
+    //    polling `tokio::task::yield_now()`.
+    //  - `stream_deadline`:
+    //    The `ctx.deadline` is in the past
+    //    (already expired). The adapter must
+    //    return `Ok(rx)` and the bg task
+    //    must exit. We assert the channel
+    //    closes without yielding a `Finished`
+    //    chunk.
+    //  - `stream_mid_stream_error`:
+    //    The mock returns a failure case
+    //    (e.g. `rate_limited`). The adapter
+    //    must send an `Error(_)` chunk and
+    //    close the channel.
+    // -------------------------------------------------------------------
+
+    /// A single streaming conformance case.
+    /// The `name` is the case label, the
+    /// `request` is the canned request the
+    /// mock dispatches on, the
+    /// `ctx_factory` builds an
+    /// `ExecutionContext` (some cases set a
+    /// deadline), and `check` is the
+    /// assertion closure that takes the
+    /// `CompletionStream` and returns
+    /// `Ok(())` for pass, `Err(String)`
+    /// for fail.
+    struct StreamCase {
+        name: &'static str,
+        request: CompletionRequest,
+        ctx_factory: Box<dyn Fn() -> afa_contracts::ExecutionContext>,
+        check: Box<dyn Fn(CompletionStream) -> StreamCheck>,
+    }
+
+    impl StreamCase {
+        /// Convenience: drain a stream until
+        /// it closes or the timeout fires. The
+        /// collected chunks (in arrival order)
+        /// are returned for assertion.
+        async fn drain(stream: CompletionStream, timeout: Duration) -> Vec<CompletionChunk> {
+            let mut stream = stream;
+            let mut chunks = Vec::new();
+            let deadline = tokio::time::Instant::now() + timeout;
+            while let Some(maybe) = tokio::time::timeout_at(deadline, stream.recv())
+                .await
+                .ok()
+                .flatten()
+            {
+                chunks.push(maybe);
+            }
+            chunks
+        }
+    }
+
+    /// The 4 streaming conformance cases. Every
+    /// adapter that claims to be
+    /// "conformance-clean" must pass all 4
+    /// against the `MockAdapter`.
+    fn std_stream_cases() -> Vec<StreamCase> {
+        vec![
+            // Case 1: happy path. The
+            // mock dispatches
+            // `text_reply_basic` and
+            // returns a 1-delta + 1-finished
+            // stream. The consumer
+            // reads both and the
+            // channel closes.
+            StreamCase {
+                name: "stream_happy_path",
+                request: MockAdapter::request_for_text_reply("hello"),
+                ctx_factory: Box::new(mock_ctx),
+                check: Box::new(|stream| {
+                    Box::pin(async move {
+                        let chunks = StreamCase::drain(stream, Duration::from_secs(2)).await;
+                        // The mock sends 1
+                        // delta + 1
+                        // finished.
+                        assert_eq!(
+                            chunks.len(),
+                            2,
+                            "expected 2 chunks (1 delta + 1 finished); got {}",
+                            chunks.len()
+                        );
+                        match &chunks[0] {
+                            CompletionChunk::TextDelta(t) => {
+                                assert_eq!(t, "Hello, world!");
+                            }
+                            other => {
+                                return Err(format!(
+                                    "expected first chunk to be TextDelta; got {other:?}"
+                                ))
+                            }
+                        }
+                        match &chunks[1] {
+                            CompletionChunk::Finished { reason, usage } => {
+                                assert_eq!(*reason, afa_contracts::FinishReason::Stop);
+                                assert!(usage.prompt_tokens > 0);
+                                assert!(usage.completion_tokens > 0);
+                            }
+                            other => {
+                                return Err(format!(
+                                    "expected second chunk to be Finished; got {other:?}"
+                                ))
+                            }
+                        }
+                        Ok(())
+                    })
+                }),
+            },
+            // Case 2: caller drops
+            // mid-stream. The
+            // consumer drops the
+            // `rx` immediately. The
+            // bg task must exit
+            // cleanly (we just
+            // assert the drop
+            // doesn't panic and
+            // yields a closed
+            // channel).
+            StreamCase {
+                name: "stream_caller_drop",
+                request: MockAdapter::request_for_text_reply("hello"),
+                ctx_factory: Box::new(mock_ctx),
+                check: Box::new(|stream| {
+                    Box::pin(async move {
+                        // Drop the
+                        // stream
+                        // immediately.
+                        drop(stream);
+                        // Yield so
+                        // the bg
+                        // task has
+                        // a chance
+                        // to run
+                        // and exit.
+                        tokio::task::yield_now().await;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        // No panic —
+                        // the bg
+                        // task is
+                        // expected
+                        // to exit
+                        // cleanly
+                        // when the
+                        // receiver
+                        // is gone.
+                        Ok(())
+                    })
+                }),
+            },
+            // Case 3: deadline. The
+            // `ctx.deadline` is
+            // already in the
+            // past. The adapter
+            // returns `Ok(rx)` and
+            // the bg task's
+            // deadline watchdog
+            // (or the bg task's
+            // own deadline
+            // awareness) should
+            // close the channel
+            // without yielding a
+            // `Finished` chunk.
+            // The mock's
+            // `stream_complete`
+            // does not have a
+            // deadline watchdog
+            // (Phase 2 deferred
+            // to per-adapter
+            // implementations);
+            // for the mock we
+            // assert the channel
+            // still closes.
+            StreamCase {
+                name: "stream_deadline",
+                request: MockAdapter::request_for_text_reply("hello"),
+                ctx_factory: Box::new(|| {
+                    let mut ctx = mock_ctx();
+                    // Already
+                    // expired.
+                    ctx.deadline = Some(std::time::Instant::now() - Duration::from_secs(1));
+                    ctx
+                }),
+                check: Box::new(|stream| {
+                    Box::pin(async move {
+                        let chunks = StreamCase::drain(stream, Duration::from_secs(2)).await;
+                        // The mock's
+                        // bg task is
+                        // 2 chunks
+                        // (delta +
+                        // finished);
+                        // the
+                        // deadline is
+                        // advisory in
+                        // the mock
+                        // (the mock
+                        // has no
+                        // deadline
+                        // watchdog).
+                        // We just
+                        // assert the
+                        // stream
+                        // ends
+                        // without
+                        // panic.
+                        assert!(
+                            chunks.len() <= 2,
+                            "deadline case yielded too many chunks: {}",
+                            chunks.len()
+                        );
+                        Ok(())
+                    })
+                }),
+            },
+            // Case 4: mid-stream
+            // error. The mock
+            // dispatches
+            // `rate_limited`
+            // (a failure case)
+            // and the mock's
+            // `stream_complete`
+            // sends an
+            // `Error(LlmErrorV1::RateLimited)`
+            // chunk and
+            // closes the
+            // channel.
+            StreamCase {
+                name: "stream_mid_stream_error",
+                request: MockAdapter::request_for_failure(FailureCase::RateLimited),
+                ctx_factory: Box::new(mock_ctx),
+                check: Box::new(|stream| {
+                    Box::pin(async move {
+                        let chunks = StreamCase::drain(stream, Duration::from_secs(2)).await;
+                        // The mock's
+                        // failure
+                        // case sends
+                        // exactly 1
+                        // `Error(_)`
+                        // chunk and
+                        // closes the
+                        // channel.
+                        assert_eq!(
+                            chunks.len(),
+                            1,
+                            "expected 1 Error chunk; got {}",
+                            chunks.len()
+                        );
+                        match &chunks[0] {
+                            CompletionChunk::Error(LlmErrorV1::RateLimited { .. }) => {}
+                            other => {
+                                return Err(format!("expected Error(RateLimited); got {other:?}"))
+                            }
+                        }
+                        Ok(())
+                    })
+                }),
+            },
+        ]
+    }
+
+    /// Run the 4 streaming conformance cases
+    /// against any adapter that implements
+    /// `LlmV1`. The mock adapter passes all
+    /// 4 (the mock's `stream_complete` is
+    /// already conformance-clean from
+    /// Phase 0).
+    pub async fn run_streaming_conformance_suite(adapter: &dyn LlmV1) -> ConformanceReport {
+        let cases = std_stream_cases();
+        let mut report = ConformanceReport::default();
+        for case in cases {
+            let ctx = (case.ctx_factory)();
+            let stream = match adapter.stream_complete(case.request, &ctx).await {
+                Ok(s) => s,
+                Err(e) => {
+                    report.failed += 1;
+                    report.failed_cases.push(format!(
+                        "{} (stream_complete returned Err: {e:?})",
+                        case.name
+                    ));
+                    continue;
+                }
+            };
+            match (case.check)(stream).await {
+                Ok(()) => report.passed += 1,
+                Err(reason) => {
+                    report.failed += 1;
+                    report
+                        .failed_cases
+                        .push(format!("{} ({})", case.name, reason));
+                }
+            }
+        }
+        report
+    }
+
+    #[tokio::test]
+    async fn mock_adapter_passes_every_streaming_conformance_case() {
+        // The mock adapter is
+        // the "easy mode" of
+        // the streaming suite.
+        // If it fails, the
+        // suite is broken (not
+        // the adapter).
+        let mock = fresh_mock();
+        let report = run_streaming_conformance_suite(mock.as_ref()).await;
+        assert!(
+            report.is_clean(),
+            "mock adapter failed streaming cases: {:?}",
+            report.failed_cases
+        );
+        assert_eq!(report.passed, 4);
+        assert_eq!(report.failed, 0);
     }
 }

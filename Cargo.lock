@@ -106,6 +106,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "afa-plugin-llm-chat-completions"
+version = "0.1.0"
+dependencies = [
+ "afa-bus",
+ "afa-contracts",
+ "afa-llm",
+ "async-trait",
+ "chrono",
+ "eventsource-stream",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "wiremock",
+ "zeroize",
+]
+
+[[package]]
 name = "afa-plugin-llm-http"
 version = "0.1.0"
 dependencies = [
@@ -116,29 +137,12 @@ dependencies = [
  "async-openai",
  "async-trait",
  "chrono",
+ "eventsource-stream",
+ "futures-util",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "wiremock",
- "zeroize",
-]
-
-[[package]]
-name = "afa-plugin-llm-openai-compat"
-version = "0.1.0"
-dependencies = [
- "afa-bus",
- "afa-contracts",
- "afa-llm",
- "async-trait",
- "chrono",
- "reqwest",
- "serde",
- "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

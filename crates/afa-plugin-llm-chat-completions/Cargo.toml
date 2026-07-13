@@ -1,8 +1,8 @@
 [package]
-name = "afa-plugin-llm-openai-compat"
+name = "afa-plugin-llm-chat-completions"
 version = "0.1.0"
 edition = "2021"
-description = "OpenAI Chat Completions API-compatible LLM engine adapter. Talks to any service that speaks the /chat/completions shape (OpenAI Chat Completions, Groq, Cerebras, Ollama /v1, LM Studio, llama.cpp, vLLM, freellmapi, etc.)."
+description = "Chat Completions API-compatible LLM engine adapter. Talks to any service that speaks the OpenAI Chat Completions shape (OpenAI Chat Completions, Groq, Cerebras, Ollama /v1, LM Studio, llama.cpp, vLLM, freellmapi, etc.). The crate is named after the wire format (Chat Completions), not the original vendor — any service implementing the same shape is supported."
 license = "Apache-2.0"
 
 [dependencies]
@@ -16,7 +16,15 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 zeroize = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+# SSE parser for `stream_complete` (Phase 2).
+# The `Response::bytes_stream()` is wrapped
+# in `.eventsource()` to yield typed SSE
+# events.
+eventsource-stream = { workspace = true }
+# `StreamExt::next` for iterating the SSE
+# stream inside the background task.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 wiremock = "0.6"

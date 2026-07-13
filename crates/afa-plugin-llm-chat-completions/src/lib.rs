@@ -1,8 +1,8 @@
-//! Code Map: afa-plugin-llm-openai-compat (the OpenAI Chat Completions adapter)
+//! Code Map: afa-plugin-llm-chat-completions (the OpenAI Chat Completions adapter)
 //! - `ChatCompletionsAdapter`: The concrete `LlmV1` adapter for
 //!   any service that speaks the OpenAI Chat Completions wire
 //!   format (`POST {base_url}/chat/completions`). This is
-//!   intentionally separate from `OpenAiAdapter` in
+//!   intentionally separate from `ResponsesAdapter` in
 //!   `afa-plugin-llm-http` (which targets the new OpenAI
 //!   Responses API at `/v1/responses`). The two are sibling
 //!   adapters; the difference is the wire format. A future
@@ -22,7 +22,7 @@
 //!   drop. Duplicated here (rather than DRY'd into
 //!   `afa-llm`) because the holder's config type is
 //!   different and a single shared `UnsealedHolder` would
-//!   force the http and openai-compat plugins to depend on
+//!   force the http and chat-completions plugins to depend on
 //!   each other's config types. The pattern is small
 //!   (~150 lines) and the duplication is a deliberate
 //!   trade-off; a future "DRY key wiring" pack can extract
@@ -53,14 +53,15 @@
 //! without reading the question or the answer.
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-001 -> ChatCompletionsAdapter
-//! CID:afa-plugin-llm-openai-compat-002 -> ChatCompletionsConfig
-//! CID:afa-plugin-llm-openai-compat-003 -> key_wiring
+//! CID:afa-plugin-llm-chat-completions-001 -> ChatCompletionsAdapter
+//! CID:afa-plugin-llm-chat-completions-002 -> ChatCompletionsConfig
+//! CID:afa-plugin-llm-chat-completions-003 -> key_wiring
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-" crates/afa-plugin-llm-openai-compat/src/
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-" crates/afa-plugin-llm-chat-completions/src/
 
-#![doc(html_root_url = "https://docs.rs/afa-plugin-llm-openai-compat/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/afa-plugin-llm-chat-completions/0.1.0")]
 
 pub mod adapter;
 pub mod config;
 pub mod key_wiring;
+pub mod streaming;

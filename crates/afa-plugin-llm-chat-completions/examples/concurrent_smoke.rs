@@ -46,7 +46,7 @@
 //! FREELLMAPI_URL="http://localhost:3001/v1" \
 //! FREELLMAPI_MODEL="auto" \
 //! FREELLMAPI_KEY="..." \
-//! cargo run --example concurrent_smoke -p afa-plugin-llm-openai-compat
+//! cargo run --example concurrent_smoke -p afa-plugin-llm-chat-completions
 //! ```
 //!
 //! Exits 0 if all 50 requests succeed and
@@ -80,9 +80,9 @@
 //! unique ticket and both slips are stamped.
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-example-003 -> concurrent_smoke
+//! CID:afa-plugin-llm-chat-completions-example-003 -> concurrent_smoke
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-example-" crates/afa-plugin-llm-openai-compat/examples/
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-example-" crates/afa-plugin-llm-chat-completions/examples/
 
 use std::collections::HashSet;
 use std::env;
@@ -95,8 +95,8 @@ use afa_contracts::{
     ConversationItem, CorrelationId, ExecutionContext, LlmErrorV1, LlmV1, ModelCapabilities,
     SamplingParams, SecretRef, SecurityErrorV1, SecurityV1, UnsealedSecret,
 };
-use afa_plugin_llm_openai_compat::adapter::ChatCompletionsAdapter;
-use afa_plugin_llm_openai_compat::config::ChatCompletionsConfig;
+use afa_plugin_llm_chat_completions::adapter::ChatCompletionsAdapter;
+use afa_plugin_llm_chat_completions::config::ChatCompletionsConfig;
 use async_trait::async_trait;
 
 // ---------------------------------------------------------------------------

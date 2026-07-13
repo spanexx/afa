@@ -5,7 +5,7 @@
 //!   workflows to size their context window), and two
 //!   feature flags (`supports_vision`, `supports_tool_use`).
 //!   The values are decided at adapter construction
-//!   (e.g. `OpenAiConfig` sets them for the model it is
+//!   (e.g. `ResponsesConfig` sets them for the model it is
 //!   hard-wired to) and never change for the process
 //!   lifetime.
 //!
@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 // negotiation: the model is the model.
 // Uses: nothing.
 // Used by: `LlmV1::describe_capabilities`,
-// `OpenAiConfig` (the source of the values).
+// `ResponsesConfig` (the source of the values).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
     /// The hard cap on prompt + completion tokens.

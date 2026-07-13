@@ -1,0 +1,171 @@
+# Handoff — 2026-07-13 (Session 4, Pack #4)
+
+## Resume point
+Wire-format rename of the two LLM adapter crates is **code-complete, all
+4 validation gates green, working tree staged for commit**. The user
+wanted the misleading vendor name "OpenAiAdapter" / "afa-plugin-llm-
+openai-compat" purged in favour of the actual protocol name (Responses
+API for the new wire format, Chat Completions for the older wire
+format). The rename is split into two atomic commits worth of work
+(Phase 2 streaming + Phase 2.5 wire-format rename) but the user wants
+a single commit.
+
+## What's done
+
+- `crates/afa-plugin-llm-openai-compat/` → `crates/afa-plugin-llm-chat-
+  completions/` (12 file renames: 1 Cargo.toml + 4 examples + 4 src +
+  3 tests, all tracked by git as `R`).
+- `crates/afa-plugin-llm-http/src/openai_adapter.rs` →
+  `crates/afa-plugin-llm-http/src/responses_adapter.rs` (1 file rename).
+- Type renames in `afa-plugin-llm-http`:
+  - `OpenAiAdapter` → `ResponsesAdapter`
+  - `OpenAiConfig` → `ResponsesConfig`
+  - `OPENAI_PROD_BASE_URL` → `OPENAI_RESPONSES_BASE_URL`
+  - `map_request_to_openai` → `map_request_to_responses`
+  - preset `gpt_4o` → `responses_gpt_4o` / `responses_gpt_4o_with_base_url`
+  - module path `super::openai_adapter::` → `super::responses_adapter::`
+  - tracing message "openai adapter recovered after 401" → "responses
+    adapter recovered after 401"
+  - All CID header comments + module doc-block stories rewritten to
+    refer to "OpenAI Responses-API specialist" (accurate description,
+    not a vendor tag)
+- Type renames in `afa-plugin-llm-chat-completions`:
+  - `OPENAI_CHAT_PROD_BASE_URL` → `OPENAI_CHAT_COMPLETIONS_BASE_URL`
+  - default `provider_name` `"openai-prod"` → `"chat-completions-prod"`
+  - example `SecretRef.name` `"openai-prod-key"` → `"chat-completions-
+    prod-key"` (test fixtures)
+  - test `SecretRef.name` `"openai-compat-test-key"` → `"chat-
+    completions-test-key"` (test fixtures)
+- Cross-crate sweep: `afa-contracts::llm::capabilities` (doc comment),
+  `afa-llm::tests::llm_v1` (doc comment), `afa-llm::conformance` (the
+  rename touched audit-event key names too).
+- `Cargo.lock` regenerated (the renamed crate changed path in the
+  workspace member hash).
+- `cargo fmt --all` applied (the rename produced 3 long-line
+  diagnostics that fmt cleaned up).
+- `docs/features/llm-engine-baseline/{PRD,TRD,FLOW,IMPL}.md` updated
+  to reflect the new crate + type names. (Docs live in
+  `../docs/`, outside the `afa/` git repo, so the doc edits are NOT
+  staged — they are local-only and the next commit on the docs
+  branch can pick them up.)
+
+## What's NOT done (intentional, out of scope)
+
+- The `async-openai = "0.29"` dep is still in
+  `crates/afa-plugin-llm-http/Cargo.toml` line 13. Per project
+  memory, this is a leftover Phase 1 dependency scheduled for
+  removal in Phase 3 cleanup. It is not used by any `use` in the
+  crate (raw `reqwest` does the transport). Dropping it now would
+  mix the wire-format rename with a dep-removal cleanup; the user
+  asked for the rename only. Note for Phase 3.
+- The session logs (`sessions/llm-engine-*.md`) and
+  `sessions/.last-handoff` still reference the old names. Per the
+  `log-prompt` skill rule "append only — never rewrite earlier
+  entries", those are frozen historical records. Future agents
+  should read the new commit message and the new handoff for the
+  current names.
+
+## Validation gate state
+
+```
+$ make
+cargo fmt --all -- --check                  [PASS]
+cargo clippy --workspace --all-targets
+  -- -D warnings                             [PASS]
+cargo test --workspace                      [PASS — 218/218]
+cargo doc --workspace --no-deps             [PASS]
+```
+
+## Git state
+
+- 26 files staged (`M`, `A`, `R`), 0 unstaged, 0 untracked.
+- 2784 insertions, 237 deletions.
+- Branch: `main`. Last commit: `c4d0922 feat(afa-plugin-llm-openai-
+  compat): add three new live-vendor smoke examples` (the previous
+  session's "vendor quirks" commit).
+- The session log `/home/spanexx/Shared/agents/sessions/llm-engine-
+  continue-3.md` describes the "Full wire-format rename" plan the
+  user authorized mid-session; this handoff is the implementation
+  of that plan.
+
+## Suggested commit message (for the user to run manually)
+
+```
+refactor(llm): rename LLM adapter crates + types to wire-format-neutral names
+
+The vendor name "OpenAI" was leaking into the type names, module
+names, and constant names of both LLM adapter crates, making the
+codebase feel married to one vendor and obscuring the actual
+protocol each crate implements. This commit renames the public
+surface of the LLM plugin crates to the wire format each one
+talks, not the vendor that originated the format.
+
+afa-plugin-llm-openai-compat -> afa-plugin-llm-chat-completions
+  (the older /chat/completions wire format, supported by every
+  OpenAI-compatible vendor: Groq, Cerebras, Ollama /v1, LM
+  Studio, llama.cpp, vLLM, freellmapi, etc.)
+afa-plugin-llm-http (unchanged crate name — already vendor-neutral;
+  it targets the OpenAI Responses API by design)
+  src/openai_adapter.rs -> src/responses_adapter.rs
+  struct OpenAiAdapter   -> struct ResponsesAdapter
+  struct OpenAiConfig    -> struct ResponsesConfig
+  const OPENAI_PROD_BASE_URL -> const OPENAI_RESPONSES_BASE_URL
+  fn   map_request_to_openai -> fn   map_request_to_responses
+  preset gpt_4o          -> preset responses_gpt_4o
+
+afa-plugin-llm-chat-completions (the renamed compat crate):
+  const OPENAI_CHAT_PROD_BASE_URL -> const OPENAI_CHAT_COMPLETIONS_BASE_URL
+  default provider_name  "openai-prod" -> "chat-completions-prod"
+  test SecretRef.name    "openai-prod-key" -> "chat-completions-prod-key"
+  test SecretRef.name    "openai-compat-test-key" -> "chat-completions-test-key"
+
+The "OpenAI" name is preserved in:
+- doc-block story-telling comments that describe the protocol
+  ("OpenAI Responses API", "OpenAI Chat Completions API") — these
+  are accurate descriptions of the wire format, not misleading
+  type names
+- the test key_name "openai-prod-key" in the http crate, which
+  literally represents the OpenAI production key the operator
+  pre-seals (this crate talks to OpenAI only; the chat-completions
+  crate talks to any compatible vendor so the provider_name was
+  misleading there)
+- the `afa-contracts::llm::capabilities` doc-comment example, which
+  now uses ResponsesConfig
+- the `afa-llm::tests::llm_v1` doc-comment example, which now
+  mentions ResponsesAdapter as the concrete adapter
+
+Validation: 218/218 tests pass, clippy clean, doc builds.
+
+Phase 2 work (streaming.rs + adapter_streaming.rs in both sibling
+crates, conformance.rs in afa-llm) is included in this commit —
+it was the unstaged follow-up from the previous session. The two
+phases are atomic w.r.t. each other (Phase 2 imports Phase 1.5/2
+types).
+
+Follow-up: async-openai = "0.29" is still in
+afa-plugin-llm-http/Cargo.toml. It is unused (raw reqwest does
+the transport). Drop in Phase 3 cleanup.
+```
+
+The user executes the commit manually per project memory.
+
+## Next step (Phase 3) preview
+
+Phase 3 = tool calls + describe_capabilities caching. Tracked in
+IMPL-llm-engine-baseline.md §5 (NOT STARTED). When the user is
+ready, this handoff becomes the resume point — the agent should:
+
+1. Read `docs/features/llm-engine-baseline/IMPL-llm-engine-baseline.md`
+   §5 in full before planning.
+2. Decide whether tool calls go in `afa-contracts::llm` (the
+   type-only crate) or in a new helper crate. Per the
+   "sibling-crate" pattern, a new helper would be the
+   `afa-llm-internal` crate that absorbs the `key_wiring.rs`
+   duplication noted in project memory.
+3. Drop the `async-openai` dep as part of Phase 3 (or earlier, as
+   a separate cleanup commit if the user prefers).
+4. The `afa-plugin-llm-claude` adapter (also in the backlog)
+   becomes a copy-paste of `afa-plugin-llm-http` with a
+   different wire format and a different `key_wiring` (Anthropic
+   uses a different auth header — `x-api-key` + `anthropic-version`
+   instead of `Authorization: Bearer`).

@@ -51,7 +51,7 @@
 //! FREELLMAPI_URL="http://localhost:3001/v1" \
 //! FREELLMAPI_MODEL="auto" \
 //! FREELLMAPI_KEY="..." \
-//! cargo run --example vendor_shape_probe -p afa-plugin-llm-openai-compat
+//! cargo run --example vendor_shape_probe -p afa-plugin-llm-chat-completions
 //! ```
 //!
 //! Exits 0 if the vendor's shape matches the
@@ -82,9 +82,9 @@
 //! example is the form checker.
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-openai-compat-example-004 -> vendor_shape_probe
+//! CID:afa-plugin-llm-chat-completions-example-004 -> vendor_shape_probe
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-openai-compat-example-" crates/afa-plugin-llm-openai-compat/examples/
+//! Quick lookup: rg -n "CID:afa-plugin-llm-chat-completions-example-" crates/afa-plugin-llm-chat-completions/examples/
 
 use std::env;
 

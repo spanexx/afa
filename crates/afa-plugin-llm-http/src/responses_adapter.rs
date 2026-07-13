@@ -1,17 +1,17 @@
-//! Code Map: OpenAiAdapter
-//! - `OpenAiAdapter`: The concrete `LlmV1` adapter for
+//! Code Map: ResponsesAdapter
+//! - `ResponsesAdapter`: The concrete `LlmV1` adapter for
 //!   the OpenAI Responses API. Hard-wired to one
 //!   model at construction (the model is in
-//!   `OpenAiConfig`). All audit events
+//!   `ResponsesConfig`). All audit events
 //!   (`CompletionRequested`, `CompletionCompleted`,
 //!   `CompletionFailed`) are published on the event bus
 //!   the constructor was given. The adapter uses the
 //!   `UnsealedHolder` to manage the API key (3-step
 //!   pattern: cache, retry on 401, zeroize on drop).
 //!
-//! Story (plain English): The `OpenAiAdapter` is the
-//! OpenAI specialist on the switchboard. When a
-//! workflow asks for an LLM, the switchboard
+//! Story (plain English): The `ResponsesAdapter` is the
+//! OpenAI Responses-API specialist on the switchboard. When
+//! a workflow asks for an LLM, the switchboard
 //! (`CapabilityRegistry`) hands the request to this
 //! specialist. The specialist has one permanent job:
 //! talk to the OpenAI Responses API on the model's
@@ -22,14 +22,14 @@
 //! tries once more, then gives up. Every request
 //! stamps three small tickets on the log so an
 //! auditor can later reconstruct "who asked for what
-//! from the OpenAI specialist, did it work, and how
-//! long did it take?" — without reading the question
-//! or the answer.
+//! from the Responses-API specialist, did it work, and
+//! how long did it take?" — without reading the
+//! question or the answer.
 //!
 //! CID Index:
-//! CID:afa-plugin-llm-http-adapter-001 -> OpenAiAdapter
+//! CID:afa-plugin-llm-http-adapter-001 -> ResponsesAdapter
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-llm-http-adapter-" crates/afa-plugin-llm-http/src/openai_adapter.rs
+//! Quick lookup: rg -n "CID:afa-plugin-llm-http-adapter-" crates/afa-plugin-llm-http/src/responses_adapter.rs
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -38,20 +38,20 @@ use async_trait::async_trait;
 
 use afa_bus::EventBusHandle;
 use afa_contracts::{
-    CompletionCompleted, CompletionFailed, CompletionRequest, CompletionResponse, CompletionStream,
-    ConversationItem, ExecutionContext, FinishReason, LlmErrorV1, LlmV1, ModelCapabilities,
-    SecurityV1, ToolCallRequest, ToolDefinition, Usage,
+    CompletionChunk, CompletionCompleted, CompletionFailed, CompletionRequest, CompletionResponse,
+    CompletionStream, ConversationItem, ExecutionContext, FinishReason, LlmErrorV1, LlmV1,
+    ModelCapabilities, SecurityV1, ToolCallRequest, ToolDefinition, Usage,
 };
 use chrono::Utc;
 
-use super::config::OpenAiConfig;
+use super::config::ResponsesConfig;
 use super::key_wiring::UnsealedHolder;
 
-// CID:afa-plugin-llm-http-adapter-001 - OpenAiAdapter
+// CID:afa-plugin-llm-http-adapter-001 - ResponsesAdapter
 // Purpose: The concrete `LlmV1` adapter for the
 // OpenAI Responses API. The adapter is
 // hard-wired to one model at construction (the
-// model is in `OpenAiConfig::model`); there is
+// model is in `ResponsesConfig::model`); there is
 // no per-request model override. The adapter
 // uses an `UnsealedHolder` to manage the API
 // key (3-step pattern: cache, retry on 401,
@@ -69,7 +69,7 @@ use super::key_wiring::UnsealedHolder;
 // (which holds an `Arc<dyn LlmV1>`), and any
 // workflow that calls `llm.complete` /
 // `llm.stream_complete`.
-pub struct OpenAiAdapter {
+pub struct ResponsesAdapter {
     /// The static config. Carries the
     /// vendor base URL (the adapter uses
     /// `self.config.base_url` per request;
@@ -77,7 +77,7 @@ pub struct OpenAiAdapter {
     /// tests with different wiremock servers
     /// do not trample each other via a
     /// process-global env var).
-    config: OpenAiConfig,
+    config: ResponsesConfig,
     /// The 3-step key wiring.
     key_holder: UnsealedHolder,
     /// The event bus for audit events. The
@@ -101,8 +101,8 @@ pub struct OpenAiAdapter {
     last_prompt_estimate: std::sync::Mutex<Option<u32>>,
 }
 
-impl OpenAiAdapter {
-    /// Build a new `OpenAiAdapter`. The
+impl ResponsesAdapter {
+    /// Build a new `ResponsesAdapter`. The
     /// `bus` is used to publish audit events;
     /// the `security` engine is used by the
     /// `UnsealedHolder` to unseal the API key
@@ -112,7 +112,11 @@ impl OpenAiAdapter {
     /// default in `gpt_4o` is
     /// `https://api.openai.com`; tests
     /// override it via `gpt_4o_with_base_url`).
-    pub fn new(config: OpenAiConfig, security: Arc<dyn SecurityV1>, bus: EventBusHandle) -> Self {
+    pub fn new(
+        config: ResponsesConfig,
+        security: Arc<dyn SecurityV1>,
+        bus: EventBusHandle,
+    ) -> Self {
         Self {
             key_holder: UnsealedHolder::new(security, config.clone()),
             config,
@@ -191,7 +195,7 @@ impl OpenAiAdapter {
     /// vendor-side validation (those are
     /// the vendor's HTTP 400 responses,
     /// which the adapter maps separately).
-    fn map_request_to_openai(
+    fn map_request_to_responses(
         &self,
         request: &CompletionRequest,
     ) -> Result<serde_json::Value, LlmErrorV1> {
@@ -377,7 +381,7 @@ fn map_tool(tool: &ToolDefinition) -> serde_json::Value {
 }
 
 #[async_trait]
-impl LlmV1 for OpenAiAdapter {
+impl LlmV1 for ResponsesAdapter {
     async fn complete(
         &self,
         request: CompletionRequest,
@@ -391,7 +395,7 @@ impl LlmV1 for OpenAiAdapter {
         let start = Instant::now();
 
         // Step 2: build the request body.
-        let body = self.map_request_to_openai(&request)?;
+        let body = self.map_request_to_responses(&request)?;
 
         // Step 3: fetch the API key via the
         // 3-step holder. The first call
@@ -427,7 +431,7 @@ impl LlmV1 for OpenAiAdapter {
                     tracing::info!(
                         correlation_id = %ctx.correlation_id,
                         attempts,
-                        "openai adapter recovered after 401"
+                        "responses adapter recovered after 401"
                     );
                 }
                 Ok(response)
@@ -439,18 +443,116 @@ impl LlmV1 for OpenAiAdapter {
         }
     }
 
+    // CID:afa-plugin-llm-http-adapter-005 - stream_complete
+    // Purpose: Phase 2 streaming entry
+    // point. The full wire logic lives
+    // in `streaming.rs` (the
+    // `tokio::spawn` background task,
+    // the SSE event mapper, the 401
+    // retry, the cancellation paths).
+    // This method does the four
+    // top-level things a caller
+    // expects:
+    //  1. Publish `CompletionRequested`
+    //     FIRST (before any I/O).
+    //  2. Build the request body with
+    //     `"stream": true` injected.
+    //  3. Unseal the initial key (the
+    //     first call uses the cached
+    //     value; the bg task re-unseals
+    //     on 401).
+    //  4. Open a bounded
+    //     `mpsc::channel(64)`,
+    //     `tokio::spawn` the bg task
+    //     (which holds one `tx` clone
+    //     and the `request` context),
+    //     and — if `ctx.deadline` is
+    //     `Some(_)` — spawn the
+    //     deadline watchdog (which
+    //     holds a second `tx` clone
+    //     and drops it on timeout).
+    //     The consumer's `rx` is
+    //     returned.
+    // Used by: any workflow that calls
+    // `llm.stream_complete`; the
+    // `CapabilityRegistry` does not
+    // dispatch streaming calls (it
+    // only resolves the adapter).
     async fn stream_complete(
         &self,
-        _request: CompletionRequest,
-        _ctx: &ExecutionContext,
+        request: CompletionRequest,
+        ctx: &ExecutionContext,
     ) -> Result<CompletionStream, LlmErrorV1> {
-        // Streaming is in Phase 2 (not
-        // Phase 1). For now, return an
-        // error so callers know it's not
-        // implemented yet.
-        Err(LlmErrorV1::Internal {
-            reason: "stream_complete is not implemented in Phase 1 (deferred to Phase 2)".into(),
-        })
+        // Step 1: publish the
+        // `CompletionRequested` audit
+        // event. Always first.
+        self.publish_requested(&request, ctx).await;
+        let start = Instant::now();
+
+        // Step 2: build the request body
+        // (same shape as `complete`),
+        // then add `"stream": true`.
+        let mut body = self.map_request_to_responses(&request)?;
+        body["stream"] = serde_json::Value::Bool(true);
+
+        // Step 3: unseal the initial key.
+        // On failure we publish the
+        // failure audit event and
+        // return the error — the bg
+        // task is not started in this
+        // case (the channel is never
+        // opened, so the consumer can
+        // never see a partial stream).
+        let key = self.key_holder.get_or_unseal(ctx).await?;
+        let initial_auth = format!("Bearer {key}");
+
+        // Step 4: open the channel +
+        // spawn the bg task + spawn
+        // the deadline watchdog. The
+        // `mpsc::channel(64)` is the
+        // bounded queue the IMPL doc
+        // specifies.
+        let (tx, rx) = tokio::sync::mpsc::channel::<CompletionChunk>(64);
+        super::streaming::spawn_streaming(
+            self.config.clone(),
+            // The bg task gets a fresh
+            // `Arc` clone of the
+            // security engine (the
+            // adapter's field is
+            // `UnsealedHolder`, not the
+            // raw engine, so the bg
+            // task can't use it
+            // directly for the
+            // 401-retry path).
+            self.key_holder.share_security_arc(),
+            self.bus.clone(),
+            ctx.clone(),
+            body,
+            initial_auth,
+            start,
+            tx.clone(),
+        );
+        // Deadline watchdog: if
+        // `ctx.deadline` is `Some`,
+        // spawn a task that sleeps
+        // until the deadline and
+        // then drops its `tx` clone.
+        // Dropping the only sender
+        // makes the bg task's
+        // `send().await` fail, which
+        // is the "deadline hit"
+        // signal.
+        if let Some(deadline) = ctx.deadline {
+            let tx_watchdog = tx.clone();
+            tokio::spawn(async move {
+                let now = std::time::Instant::now();
+                if deadline > now {
+                    tokio::time::sleep(deadline - now).await;
+                }
+                drop(tx_watchdog);
+            });
+        }
+        Ok(rx)
     }
 
     fn describe_capabilities(&self) -> ModelCapabilities {
@@ -468,14 +570,14 @@ impl LlmV1 for OpenAiAdapter {
 /// attempts (1 or 2) for the audit
 /// trail. The base URL comes from
 /// `config.base_url` (captured at
-/// construction; see `OpenAiConfig`)
+/// construction; see `ResponsesConfig`)
 /// so that each adapter is bound to a
 /// specific URL — parallel tests with
 /// different wiremock servers do not
 /// trample each other via a process-
 /// global env var.
 async fn call_vendor_with_retry(
-    config: &OpenAiConfig,
+    config: &ResponsesConfig,
     body: &serde_json::Value,
     auth: &str,
     holder: &UnsealedHolder,
@@ -513,9 +615,9 @@ async fn call_vendor_with_retry(
 /// of the 13 `LlmErrorV1` variants. The
 /// base URL comes from
 /// `config.base_url` (see
-/// `OpenAiConfig`).
+/// `ResponsesConfig`).
 async fn call_vendor(
-    config: &OpenAiConfig,
+    config: &ResponsesConfig,
     body: &serde_json::Value,
     auth: &str,
 ) -> Result<(serde_json::Value, Usage, FinishReason), LlmErrorV1> {
@@ -570,7 +672,11 @@ async fn call_vendor(
 /// `context_length_exceeded`) are
 /// detected from the JSON body's
 /// `error.code` field.
-fn map_http_error(status: u16, body: &[u8], model: &str) -> LlmErrorV1 {
+// Make `pub(crate)` so the streaming
+// module (`streaming.rs`) can call it
+// from inside the bg task's 401-retry
+// path.
+pub(crate) fn map_http_error(status: u16, body: &[u8], model: &str) -> LlmErrorV1 {
     let parsed: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
     let code = parsed["error"]["code"].as_str().unwrap_or("");
     let msg = parsed["error"]["message"]
@@ -773,14 +879,14 @@ mod tests {
             tools: vec![],
             sampling: Default::default(),
         };
-        let adapter = OpenAiAdapter {
-            config: OpenAiConfig::gpt_4o(SecretRef {
+        let adapter = ResponsesAdapter {
+            config: ResponsesConfig::responses_gpt_4o(SecretRef {
                 name: "x".into(),
                 version: 1,
             }),
             key_holder: UnsealedHolder::new(
                 Arc::new(FakeForTest) as Arc<dyn SecurityV1>,
-                OpenAiConfig::gpt_4o(SecretRef {
+                ResponsesConfig::responses_gpt_4o(SecretRef {
                     name: "x".into(),
                     version: 1,
                 }),
