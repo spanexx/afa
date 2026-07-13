@@ -21,6 +21,7 @@ license = "Apache-2.0"
 # The Phase 1+ write path uses `tokio::fs::*` for
 # atomic write + `fsync` + parent-dir `fsync`.
 [dependencies]
+afa-bus = { path = "../afa-bus" }
 afa-contracts = { path = "../afa-contracts" }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -39,6 +40,7 @@ uuid = { workspace = true }
 # round-trip; `tokio-test` is the `tokio::test`
 # macro the integration tests will use.
 [dev-dependencies]
+afa-kernel = { path = "../afa-kernel" }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 tokio = { version = "1", features = ["fs", "rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }

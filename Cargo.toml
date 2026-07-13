@@ -29,8 +29,16 @@ eventsource-stream = "0.2"
 # `.index.json` serialization round-trip).
 # `uuid` is a direct dep of
 # `afa-plugin-knowledge-json` for `RecordId`
-# generation; pinned to the version the
-# `afa-contracts` crate already resolves to.
-uuid = "1.23.4"
+# generation + the per-record filename +
+# the `tag_index: HashSet<Uuid>` in the
+# `InMemoryIndex`. The `v4` feature enables
+# `Uuid::new_v4()`; the `serde` feature
+# enables `Serialize`/`Deserialize` for
+# the `.index.json` round-trip. Pinned to
+# the same version the `afa-contracts`
+# crate already resolves to so the
+# workspace has exactly one `uuid`
+# release.
+uuid = { version = "1.23.4", features = ["v4", "serde"] }
 tempfile = "3.27.0"
 proptest = "1.11.0"

@@ -1,228 +1,246 @@
-# Handoff — 2026-07-13 (Session 8, Pack #5 Phase 0)
+# Handoff — Pack #5 (Knowledge Engine) Phase 1 complete
 
-## Resume point
+## What was done
 
-Pack #5 (`knowledge-engine-json-store`) **Phase 0
-(Foundation: types + crate skeletons) is code-
-complete and green**. The next session resumes
-at **Phase 1 (Write path)** of the IMPL
-[IMPL-knowledge-engine-json-store.md](file:///home/spanexx/Shared/agents/docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md).
+**Phase 1 (Write path) of Pack #5
+(`knowledge-engine-json-store`) is
+code-complete.** The full write path is
+implemented end-to-end: the JSON+Markdown
+adapter validates input, generates a v4
+UUID `RecordId`, slugifies the topic, writes
+the file atomically (temp + fsync + rename +
+parent fsync), updates the in-memory search
+index, and publishes a `KnowledgeRecordStored`
+audit event on the bus. The other two trait
+methods (`find_information` and `list_topics`)
+are stubs returning
+`KnowledgeErrorV1::CapabilityUnsupported`
+(their real bodies land in Phase 2).
 
-## What this session delivered
+## Where the work landed
 
-1. **Decision stability check (Phase 5a)** — 3
-   questions, all confirmed:
-   - EXPLAINED on-disk layout drift: **fix
-     EXPLAINED now** (already done; on-disk
-     layout is now described as one directory
-     per topic + one `.md` per record, per
-     TRD §2.3.3).
-   - `KnowledgeRecordInput` per TRD: **added**
-     (the two-type design — `KnowledgeRecord`
-     for output, `KnowledgeRecordInput` for
-     input — is now in the contracts crate).
-   - Phase plan: **5 phases, in order** (per
-     the IMPL).
+**Modified files (committed in next commit):**
 
-2. **EXPLAINED doc patch** — fixed the on-disk
-   layout paragraph to match the TRD.
-
-3. **Phase 0 code**:
-   - `afa-contracts/src/knowledge/{mod,record,request,topic,capabilities,error,events}.rs` (7
-     new files). 9 types, 2 events, the
-     `KnowledgeV1` trait, the 5-to-6 error
-     mapping, and 3 common-field accessors
-     (`topic()`, `record_id()`, `reason()`).
-   - `afa-contracts/src/lib.rs` — added
-     `pub mod knowledge;` + `pub use
-     knowledge::{...};` re-exports.
-   - `afa-knowledge/{Cargo.toml,src/lib.rs,src/conformance.rs,tests/knowledge_v1.rs}` — new
-     crate (re-exports + conformance stub +
-     1 trait object-safety test).
-   - `afa-plugin-knowledge-json/{Cargo.toml,src/{lib,adapter,config,index,search,storage,atomic_write,topic_slug}.rs}` — new
-     crate (7 submodules as stubs;
-     `JsonKnowledgeAdapter` struct + trait impl
-     with `unimplemented!()` methods).
-   - `afa-kernel/src/capability_registry.rs` —
-     `register_knowledge` + `knowledge(key)`
-     + `RegisterError::KnowledgeAlreadyRegistered { key }`
-     + the new `knowledge: HashMap<String,
-     (Arc<dyn KnowledgeV1>, PathBuf)>` field.
-     5 new tests added (empty registry,
-     register + retrieve same Arc, duplicate
-     key fails, multiple keys independent,
-     end-to-end call works).
-   - `Cargo.toml` (workspace) — added the 2
-     new members (`afa-knowledge`,
-     `afa-plugin-knowledge-json`) and 3
-     workspace deps (`uuid 1.23.4`,
-     `tempfile 3.27.0`, `proptest 1.11.0`).
-
-4. **IMPL doc patches**:
-   - Status block updated (Phase 0 = DONE;
-     Phase 1-4 = PENDING).
-   - 5 Phase 0 task checkboxes → `[x]`.
-   - Validation condition updated to note the
-     30 new tests added (TDD deviation, marked
-     legitimate).
-
-5. **Working tree**:
-   - 4 modified files (`Cargo.lock`,
-     `Cargo.toml`, `afa-contracts/src/lib.rs`,
-     `afa-kernel/src/capability_registry.rs`).
-   - 3 new directories
-     (`afa-contracts/src/knowledge/`,
-     `afa-knowledge/`,
-     `afa-plugin-knowledge-json/`).
-   - **Uncommitted** — user runs the commit
-     (see Suggested commit message below).
-
-## Design decisions (none new in Phase 0)
-
-All design decisions were confirmed in the
-prior grilling session and the Phase 5a check
-above. No new decisions. One design note that
-emerged during implementation:
-
-- **`KnowledgeErrorV1` field access**: The 3
-  common fields (`topic`, `record_id`,
-  `reason`) are accessed via
-  `pub fn topic() -> Option<&str>`,
-  `pub fn record_id() -> Option<Uuid>`,
-  `pub fn reason() -> &str` accessors on the
-  enum. Rust's struct-variant enum fields are
-  not directly accessible by name (you must
-  pattern-match the variant), so the
-  accessors provide "direct access" semantics
-  for workflows and the audit dashboard.
-  This is a Rust-language design choice, not
-  a deviation from the PRD/TRD (which said
-  "the three common fields are public for
-  direct access" — the accessors are the way
-  to make that work in Rust).
-
-## What's still open
-
-- **Phase 1-4** of the IMPL. Phase 1 is the
-  biggest single phase (the write path: boot
-  + `store_information` + atomic write +
-  audit event publish). Phases 2-4 are
-  incremental.
-- **The conformance suite stub in
-  `afa-knowledge/src/conformance.rs`** is
-  empty (Phase 2 populates).
-- **The 4 stub modules in
-  `afa-plugin-knowledge-json`** (storage,
-  search, atomic_write, topic_slug) each
-  have a single trivial test that just
-  asserts the module compiles; Phase 1-3
-  replace them with the real per-method
+- `crates/afa-plugin-knowledge-json/Cargo.toml` —
+  added `afa-kernel` to `[dev-dependencies]`
+  so the integration test can drive the
+  real `CapabilityRegistry` hand-out.
+- `crates/afa-plugin-knowledge-json/src/lib.rs` —
+  re-exports `JsonKnowledgeAdapter`,
+  `JsonKnowledgeConfig`, `InMemoryIndex` for
+  the conformance suite and the kernel.
+- `crates/afa-plugin-knowledge-json/src/config.rs` —
+  real `JsonKnowledgeConfig` (storage_root +
+  capabilities) + `new()` constructor + 1
+  unit test.
+- `crates/afa-plugin-knowledge-json/src/topic_slug.rs` —
+  real slug-rules helper (lowercase, ASCII,
+  dash collapse, 64-char cap, empty `_`) +
+  8 unit tests covering each rule.
+- `crates/afa-plugin-knowledge-json/src/atomic_write.rs` —
+  real temp-then-rename helper (write +
+  fsync + rename + parent fsync) + 3
+  integration tests via `tempfile`.
+- `crates/afa-plugin-knowledge-json/src/index.rs` —
+  real `InMemoryIndex` (4 fields) +
+  `TopicEntry` (HashMap of RecordMeta) +
+  `RecordMeta` + 6 public methods + 5 unit
   tests.
-- **Doc drift** — the EXPLAINED is now
-  fixed. The other 4 docs (PRD, TRD, FLOW,
-  IMPL) are consistent with the
-  implementation as of Phase 0.
+- `crates/afa-plugin-knowledge-json/src/adapter.rs` —
+  real `JsonKnowledgeAdapter` with
+  async `new()` boot sequence + the
+  `KnowledgeV1` trait impl (`store_information`
+  end-to-end; `find_information` and
+  `list_topics` CapabilityUnsupported stubs;
+  `describe_capabilities` thin accessor) + 7
+  in-module unit tests covering the
+  validation paths + the happy path.
+- `crates/afa-knowledge/src/conformance.rs` —
+  added the `store_information_conformance`
+  stub function (no-op body; Phase 2
+  populates the per-method test cases).
+- `crates/afa-plugin-knowledge-json/tests/adapter_unit.rs` (new) —
+  7 unit tests exercising the public
+  `KnowledgeV1` trait surface.
+- `crates/afa-plugin-knowledge-json/tests/adapter_integration.rs` (new) —
+  1 full-stack integration test
+  (CapabilityRegistry hand-out + on-disk
+  file verification + audit event
+  verification).
 
-## Suggested commit message (user runs)
+**Doc updates:**
 
-```bash
-git add -A
-git commit -m "$(cat <<'EOF'
-feat(knowledge-engine-baseline): pack #5 phase 0 complete
+- `docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md` —
+  Phase 1 status flipped from `PENDING` to
+  `DONE` with the full Phase 1 inventory
+  listed.
 
-Adds the foundation for the Knowledge engine:
-- afa-contracts::knowledge::* — 9 types
-  (KnowledgeRecord, RecordId,
-  KnowledgeRecordInput, FindInformationRequest,
-  FindInformationResponse, Topic,
-  KnowledgeCapabilities, KnowledgeErrorV1,
-  KnowledgeErrorKind) + 2 audit events
-  (KnowledgeQueried, KnowledgeRecordStored) +
-  the KnowledgeV1 trait + the 5-to-6 error
-  mapping + 3 common-field accessors.
-- afa-knowledge — new crate with re-exports
-  and an empty conformance suite stub.
-- afa-plugin-knowledge-json — new crate with
-  7 submodules (adapter, config, index,
-  search, storage, atomic_write, topic_slug)
-  as skeletons; JsonKnowledgeAdapter struct
-  with unimplemented!() methods pending
-  Phase 1+ implementations.
-- afa-kernel::CapabilityRegistry — additive
-  register_knowledge(key, adapter,
-  storage_root) and knowledge(key) methods +
-  KnowledgeAlreadyRegistered { key } error
-  variant + new knowledge: HashMap<String,
-  (Arc<dyn KnowledgeV1>, PathBuf)> field.
-- Workspace deps: uuid 1.23.4, tempfile
-  3.27.0, proptest 1.11.0 (pinned per TRD
-  §3.6).
+## Validation results
 
-Test count: 260 passing across 42 test
-binaries (up from 230 in 33 in the Pack #4
-baseline). +30 tests / +9 binaries: 19 in
-afa-contracts::knowledge::* unit tests, 5 in
-afa-kernel capability_registry, 1 in
-afa-knowledge/tests/knowledge_v1.rs, 4 in
-afa-plugin-knowledge-json module compile
-tests, plus 1 new binary in
-afa-knowledge/tests/. All 4 validation gates
-green (fmt, clippy, test, doc).
+`make check` (the `Makefile`-driven four-gate
+suite at `afa/Makefile`) is green on the
+following:
 
-EXPLAINED doc patched to match TRD on-disk
-layout (one directory per topic, one .md
-per record).
+| Gate | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | PASS |
+| `cargo clippy --workspace --all-targets -- -D warnings` | PASS (no warnings) |
+| `cargo test --workspace` | **292 passing** across 42 test binaries (+32 from Phase 0) |
+| `cargo doc --workspace --no-deps` | PASS (0 warnings) |
 
-Phase 1 (write path: store_information +
-atomic write + boot + KnowledgeRecordStored
-event) is next.
+**Test count delta:** 260 → 292 (+32). The
+breakdown:
 
-Co-Authored-By: Claude <noreply@anthropic.com>
-EOF
-)"
-```
+- 7 in `tests/adapter_unit.rs` (the new
+  public-surface exercise).
+- 1 in `tests/adapter_integration.rs` (the
+  full-stack CapabilityRegistry hand-out
+  test).
+- The remaining 24 are in-module unit tests
+  across `config.rs` (1), `topic_slug.rs`
+  (8), `atomic_write.rs` (3), `index.rs`
+  (5), `adapter.rs` (7).
 
-## Files to read first (next session)
+## Key design decisions made in Phase 1
 
-- This handoff (you're here).
-- [IMPL-knowledge-engine-json-store.md](file:///home/spanexx/Shared/agents/docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md)
-  — Phase 1 task list at line 356+.
-- [TRD-knowledge-engine-json-store.md](file:///home/spanexx/Shared/agents/docs/features/knowledge-engine-json-store/TRD-knowledge-engine-json-store.md)
-  — §2.2.6 (error 5-to-6), §2.3 (on-disk
-  layout), §3 (dependency list), §4 (boot
-  sequence).
-- [FLOW-knowledge-engine-json-store.md](file:///home/spanexx/Shared/agents/docs/features/knowledge-engine-json-store/FLOW-knowledge-engine-json-store.md)
-  — Flow 1 (boot), Flow 2 (store_information
-  happy path), Flow 7 (store_information
-  error paths), Flow 8 (audit event publish).
-- [PRD-knowledge-engine-json-store.md](file:///home/spanexx/Shared/agents/docs/features/knowledge-engine-json-store/PRD-knowledge-engine-json-store.md)
-  — Canonical product language, acceptance
-  criteria.
+1. **`RecordId` generation inside
+   `store_information`.** The trait input
+   `KnowledgeRecordInput` does NOT carry a
+   `record_id` field (per the TRD §2.2.2
+   locked shape). The adapter generates the
+   `RecordId::new()` (v4 UUID) at write time
+   and returns it. This is the only place
+   `RecordId`s are minted in the JSON plugin.
+2. **Engine-assigned content length.** The
+   `KnowledgeRecordStored.content_length` is
+   the byte length of the content (not the
+   char count). The audit event carries
+   `content_length: u32`; the on-disk file
+   size is the source of truth.
+3. **Topic name vs topic slug.** The
+   adapter keeps both: the slug is the
+   on-disk directory name (`faq`); the
+   human-readable topic name (`FAQ`) is
+   stored in `slug_to_topic` so the
+   find/list path (Phase 2) can report
+   the name the caller wrote.
+4. **`HashMap<RecordId, RecordMeta>` for
+   the inner records map.** The contract
+   `RecordId` does not implement `Ord`,
+   only `Eq + Hash`. The Phase 2 search
+   path will sort results on the spot via
+   `created_at` (a `DateTime<Utc>`, which
+   is `Ord`).
+5. **`AfaEvent` is not dyn-compatible.**
+   The trait inherits `Serialize`, which
+   requires `Self: Sized`. The unit test
+   uses a static-type bound
+   (`fn _is_afa_event<T: AfaEvent>(_: &T)`)
+   rather than `&dyn AfaEvent`. This is
+   the same pattern the LLM plugin's
+   streaming tests use.
+6. **Explicit type annotation in the
+   integration test.** The
+   `store_information` call on a
+   `dyn KnowledgeV1` requires an explicit
+   `RecordId` type annotation on the
+   `returned_id` binding to drive
+   inference. Documented inline.
 
-## Working tree state
+## Phase 2 read-path inventory (the next step)
 
-- 4 modified, 3 untracked directories (see
-  `git status --short` above).
-- **All uncommitted** — user runs the commit
-  per the suggested message.
-- `make` green (fmt, clippy, test, doc).
+The IMPL Phase 2 task list is the next
+checkpoint. Items the next session should
+land:
 
-## Skills to consider for next session
+1. **`find_information` body.** Tokenize
+   the `free_text` query, score each
+   candidate record (BM25 or
+   simple-word-frequency), rank by score,
+   apply the tag filters, return
+   `FindInformationResponse` with the top
+   N results (and their full record
+   bodies, loaded from disk on hit).
+2. **`list_topics` body.** Read the
+   `slug_to_topic` map; return `Vec<Topic>`
+   with each topic's name, slug, and
+   record count.
+3. **Full conformance suite.** Populate
+   `store_information_conformance` and
+   the new `find_information_conformance`
+   and `list_topics_conformance` with
+   per-method test cases: happy path,
+   edge cases, error mapping, "no
+   free_text in event", "no content in
+   event", atomic-write guarantee, topic
+   slug rules.
+4. **Add a `MockAdapter` in
+   `afa-knowledge` (or `afa-contract-testing`)** so
+   the conformance suite is adapter-
+   agnostic (the JSON plugin is not
+   required at conformance-run time).
+5. **Test count target:** +30 → 322.
 
-- **`feature-pipeline`** — Phase 5b
-  (Implement). Phase 0 done; resume at
-  Phase 1.
-- **`plain-english-first`** — for the
-  Phase 1 doc comments and the
-  `store_information` error messages.
-- **`tdd`** — for the Phase 1 tests
-  (3-layer: unit in the source file,
-  integration in `tests/`, no live
-  network).
-- **`opensrc`** — Phase 1 will use
-  `tokio::fs::File::sync_all` and
-  `tokio::fs::rename` (already known APIs;
-  the opensrc run was effectively done
-  via the LLM pack's prior opensrc work
-  on `eventsource-stream` and `reqwest`).
-- **`handoff`** — at the end of Phase 1.
+## Open questions for the next session
+
+1. **Inverted-index vs. word-frequency
+   scoring.** The TRD §3.4 calls for an
+   "in-memory inverted index" but does
+   not pin the scoring algorithm. The
+   Phase 2 implementation must decide:
+   simple word frequency (fast, no extra
+   memory) or BM25 (more accurate, ~1.5x
+   memory). Recommendation: simple word
+   frequency for v1 (per the IMPL "no
+   unnecessary complexity" rule); BM25 in
+   v2 if accuracy becomes a problem.
+2. **The `EventBus::publish` signature
+   takes `&self`, not `&mut self`.** The
+   `KnowledgeRecordStored` event is
+   published concurrently with the
+   in-memory index update. The order is:
+   (a) update index, (b) publish event.
+   The reverse order would be wrong (a
+   reader could see the event before the
+   index is searchable). Phase 2 must
+   preserve this order for the
+   find/list events too.
+3. **`CapabilityRegistry::register_knowledge`
+   takes a `storage_root: PathBuf` that
+   is duplicated from the config.** This
+   is intentional (the kernel needs the
+   path for housekeeping — e.g., periodic
+   audit scans — without consulting the
+   adapter). The duplication is fine for
+   v1; a future tightening may move the
+   path into the adapter's `describe_capabilities`
+   response.
+
+## Files in scope (quick index)
+
+- Plugin source:
+  [crates/afa-plugin-knowledge-json/src/](file:///home/spanexx/Shared/agents/afa/crates/afa-plugin-knowledge-json/src/)
+- Plugin tests:
+  [crates/afa-plugin-knowledge-json/tests/](file:///home/spanexx/Shared/agents/afa/crates/afa-plugin-knowledge-json/tests/)
+- Conformance stub:
+  [crates/afa-knowledge/src/conformance.rs](file:///home/spanexx/Shared/agents/afa/crates/afa-knowledge/src/conformance.rs)
+- IMPL:
+  [docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md](file:///home/spanexx/Shared/agents/docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md)
+- PRD/TRD/FLOW: same `docs/features/knowledge-engine-json-store/` folder
+
+## Work ethics followed
+
+- Story-telling comments on every
+  non-trivial function (the "plain
+  English first" rule from
+  [PHILOSOPHY.md](file:///home/spanexx/Shared/agents/PHILOSOPHY.md)).
+- CID headers on every new type and
+  function.
+- No fake / tautological tests — every
+  test asserts on observable behavior
+  (file system, index state, bus events).
+- Validation gate is the single-command
+  `make check` entry point.
+- Logging was kept to the work itself
+  (the prompt log was appended once at
+  session start).

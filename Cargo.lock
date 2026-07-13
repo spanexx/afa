@@ -121,7 +121,9 @@ dependencies = [
 name = "afa-plugin-knowledge-json"
 version = "0.1.0"
 dependencies = [
+ "afa-bus",
  "afa-contracts",
+ "afa-kernel",
  "async-trait",
  "chrono",
  "proptest",
