@@ -34,3 +34,34 @@ name = "real_provider_smoke"
 # OpenAI-compatible service). Not hermetic;
 # `cargo run --example` only.
 
+[[example]]
+name = "negative_battery_smoke"
+# Negative battery: 6 live-vendor error paths
+# (success control, bad key, unknown model,
+# oversized context, empty content, invalid
+# temperature). Each case is asserted against
+# an acceptable-variant list (vendors vary on
+# exact wording). Not hermetic; `cargo run
+# --example` only.
+
+[[example]]
+name = "concurrent_smoke"
+# Live-vendor concurrency: fires N parallel
+# requests (default 50, override with
+# CONCURRENCY=N), asserts all N get distinct
+# correlation_ids, all N get Requested +
+# Completed bus events, and the per-request
+# correlation_id matches. Not hermetic;
+# `cargo run --example` only.
+
+[[example]]
+name = "vendor_shape_probe"
+# Live-vendor shape probe: POSTs one Chat
+# Completions request and prints the raw
+# response body + a structural diff against
+# the 6 keys the adapter expects
+# (id/object/created/model/choices/usage).
+# Catches silent JSON-shape drift between
+# OpenAI and a vendor proxy. Not hermetic;
+# `cargo run --example` only.
+
