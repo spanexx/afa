@@ -25,3 +25,12 @@ tokio = { version = "1", features = ["rt", "sync", "macros", "time", "test-util"
 # to install a `tracing` subscriber that writes to an
 # in-memory buffer.
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[[example]]
+name = "real_provider_smoke"
+# Real-vendor smoke test (uses the env-var
+# `FREELLMAPI_URL` / `FREELLMAPI_KEY` /
+# `FREELLMAPI_MODEL` to talk to a live
+# OpenAI-compatible service). Not hermetic;
+# `cargo run --example` only.
+
