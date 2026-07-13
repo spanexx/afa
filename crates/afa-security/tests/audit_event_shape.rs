@@ -30,6 +30,7 @@ use afa_contracts::SecurityV1;
 use afa_security::SecretRotated as EngineSecretRotated;
 use afa_security::SecretSealed as EngineSecretSealed;
 use afa_security::SecretUnsealed as EngineSecretUnsealed;
+use afa_security::SecurityError;
 use common::ctx_for;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -231,4 +232,132 @@ async fn no_event_carries_the_plaintext_or_the_master_key() {
             "{event_type} event must not contain the plaintext bytes; got: {json}"
         );
     }
+}
+
+#[tokio::test]
+async fn full_lifecycle_seal_unseal_rotate_unseal_old_fails_unseal_new_succeeds() {
+    // The A-3 lifecycle test from
+    // `IMPL-security-engine-baseline.md` Phase 4. Walks
+    // the engine through the full happy-path plus one
+    // invalidation path, and asserts the audit trail
+    // carries exactly the four events the design
+    // promises, in the order the engine publishes them:
+    //
+    //   1. SecretSealed   (v1 is filed)
+    //   2. SecretUnsealed (v1 is opened)
+    //   3. SecretRotated  (v1 is replaced by v2)
+    //   4. SecretUnsealed (v2 is opened)
+    //
+    // The failed unseal of v1 in step (4a) MUST NOT
+    // publish a SecretUnsealed event. The engine's
+    // `unseal` rejects a `status='rotated'` row
+    // BEFORE the publish call (see
+    // `engine.rs:327-332`), returning
+    // `SecurityError::SecretRotated`. This test is the
+    // regression-proof that an audit subscriber never
+    // sees a "secret X was opened" fact for a secret
+    // that was not actually opened — which would be a
+    // false-positive in any future compliance scan
+    // ("we unsealed the openai key 47 times" must mean
+    // 47 actual unseals, not 46 actual unseals plus 1
+    // attempt).
+    let (_dir, bus, engine) = common::new_engine_with_bus();
+    let mut sealed_sub = bus.subscribe::<EngineSecretSealed>(8);
+    let mut unsealed_sub = bus.subscribe::<EngineSecretUnsealed>(8);
+    let mut rotated_sub = bus.subscribe::<EngineSecretRotated>(8);
+
+    // 1. Seal v1.
+    let v1 = engine
+        .seal(b"plaintext-v1", "lifecycle-secret")
+        .await
+        .expect("seal v1 ok");
+
+    // 2. Unseal v1 (succeeds -> publishes
+    //    SecretUnsealed).
+    let ctx = ctx_for("lifecycle-tenant", Actor::Timer);
+    let handle = engine.unseal(&v1, &ctx).await.expect("unseal v1 ok");
+    drop(handle);
+
+    // 3. Rotate v1 -> v2.
+    let v2 = engine
+        .rotate(&v1, b"plaintext-v2", &ctx)
+        .await
+        .expect("rotate v1->v2 ok");
+    assert_eq!(v2.version, 2);
+
+    // 4. Unseal v1 (must FAIL — v1 is now
+    //    rotated-out). No audit event is published for
+    //    this call.
+    match engine.unseal(&v1, &ctx).await {
+        Err(SecurityError::SecretRotated { name, version }) => {
+            assert_eq!(name, "lifecycle-secret");
+            assert_eq!(version, 1);
+        }
+        Err(other) => panic!("expected SecurityError::SecretRotated; got {other:?}"),
+        Ok(_) => panic!("unsealing v1 (now rotated) must fail; got Ok"),
+    }
+
+    // 5. Unseal v2 (succeeds -> publishes
+    //    SecretUnsealed).
+    let handle = engine.unseal(&v2, &ctx).await.expect("unseal v2 ok");
+    drop(handle);
+
+    // Drain the audit trail in the order the engine
+    // published them.
+    let sealed = timeout(Duration::from_secs(2), sealed_sub.recv())
+        .await
+        .expect("SecretSealed should arrive within 2s")
+        .expect("SecretSealed should be Some");
+    let (s, _) = sealed;
+    assert_eq!(s.name, "lifecycle-secret");
+    assert_eq!(s.version, 1);
+
+    let unsealed_v1 = timeout(Duration::from_secs(2), unsealed_sub.recv())
+        .await
+        .expect("SecretUnsealed (v1) should arrive within 2s")
+        .expect("SecretUnsealed (v1) should be Some");
+    let (u1, _) = unsealed_v1;
+    assert_eq!(u1.name, "lifecycle-secret");
+    assert_eq!(u1.version, 1);
+
+    let rotated = timeout(Duration::from_secs(2), rotated_sub.recv())
+        .await
+        .expect("SecretRotated should arrive within 2s")
+        .expect("SecretRotated should be Some");
+    let (r, _) = rotated;
+    assert_eq!(r.name, "lifecycle-secret");
+    assert_eq!(r.old_version, 1);
+    assert_eq!(r.new_version, 2);
+
+    let unsealed_v2 = timeout(Duration::from_secs(2), unsealed_sub.recv())
+        .await
+        .expect("SecretUnsealed (v2) should arrive within 2s")
+        .expect("SecretUnsealed (v2) should be Some");
+    let (u2, _) = unsealed_v2;
+    assert_eq!(u2.name, "lifecycle-secret");
+    assert_eq!(u2.version, 2);
+
+    // No further events of any kind — the failed
+    // unseal in step (4) did NOT publish a
+    // SecretUnsealed fact. If it had, one of the next
+    // three `recv()`s would have returned Some
+    // instead of timing out.
+    assert!(
+        timeout(Duration::from_millis(100), sealed_sub.recv())
+            .await
+            .is_err(),
+        "no more SecretSealed events expected"
+    );
+    assert!(
+        timeout(Duration::from_millis(100), unsealed_sub.recv())
+            .await
+            .is_err(),
+        "no more SecretUnsealed events expected; failed unseal must not publish"
+    );
+    assert!(
+        timeout(Duration::from_millis(100), rotated_sub.recv())
+            .await
+            .is_err(),
+        "no more SecretRotated events expected"
+    );
 }
