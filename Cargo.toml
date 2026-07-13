@@ -6,4 +6,6 @@ members = [
     "crates/afa-contract-testing",
     "crates/afa-kernel",
     "crates/afa-security",
+    "crates/afa-llm",
+    "crates/afa-plugin-llm-http",
 ]

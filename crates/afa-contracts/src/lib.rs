@@ -8,6 +8,10 @@
 //!   `execution_context.rs`.
 //! - `ids`: The tracking number and the tenant name tag. See
 //!   `ids.rs`.
+//! - `llm`: The v1 LLM engine contract: the trait `LlmV1`,
+//!   the request/response/stream shapes, the capabilities
+//!   card, the 13 typed errors, and the three audit events.
+//!   See `llm/mod.rs`.
 //! - `security`: The v1 security engine contract: the trait
 //!   `SecurityV1`, the receipt `SecretRef`, the zeroing-on-drop
 //!   handle `UnsealedSecret`, the eleven error buckets, and
@@ -31,8 +35,9 @@
 //! CID:afa-contracts-lib-002 -> events
 //! CID:afa-contracts-lib-003 -> execution_context
 //! CID:afa-contracts-lib-004 -> ids
-//! CID:afa-contracts-lib-005 -> security
-//! CID:afa-contracts-lib-006 -> versioning_example
+//! CID:afa-contracts-lib-005 -> llm
+//! CID:afa-contracts-lib-006 -> security
+//! CID:afa-contracts-lib-007 -> versioning_example
 //!
 //! Quick lookup: rg -n "CID:afa-contracts-lib-" crates/afa-contracts/src/lib.rs
 
@@ -57,14 +62,23 @@ pub mod execution_context;
 // Purpose: Re-export the tracking number and tenant name tag.
 // Used by: every request, every event, every log line.
 pub mod ids;
-// CID:afa-contracts-lib-005 - security
+// CID:afa-contracts-lib-005 - llm
+// Purpose: Re-export the v1 LLM engine contract: the trait, the
+// request/response/stream shapes, the capabilities card, the 13
+// typed errors, and the three audit events. See `llm/mod.rs`
+// for the Code Map.
+// Used by: the `afa-plugin-llm-http` adapter (which implements
+// the trait) and every workflow that calls `llm.complete` /
+// `llm.stream_complete`.
+pub mod llm;
+// CID:afa-contracts-lib-006 - security
 // Purpose: Re-export the v1 security engine contract: the trait,
 // the receipt, the zeroing handle, the error type, and the
 // three audit events. See `security.rs` for the Code Map.
 // Used by: the `afa-security` engine (which implements the
 // trait) and every adapter that needs a secret.
 pub mod security;
-// CID:afa-contracts-lib-006 - versioning_example
+// CID:afa-contracts-lib-007 - versioning_example
 // Purpose: Re-export the worked example of the V1/V2 versioning
 // rule and the dyn-compatibility pattern.
 // Used by: the conformance test in `afa-contract-testing` and
@@ -75,6 +89,12 @@ pub use error::{AfaError, AfaErrorKind, ExampleStoreErrorV1};
 pub use events::{AfaEvent, ExampleLessonCreated};
 pub use execution_context::{Actor, ExecutionContext};
 pub use ids::{CorrelationId, TenantId};
+pub use llm::{
+    CompletionChunk, CompletionCompleted, CompletionFailed, CompletionRequest, CompletionRequested,
+    CompletionResponse, CompletionStream, ContentBlock, ConversationItem, FinishReason, ImageData,
+    LlmErrorKind, LlmErrorV1, LlmV1, ModelCapabilities, SamplingParams, ToolCallRequest,
+    ToolDefinition, Usage,
+};
 pub use security::{
     SecretRef, SecretRotated, SecretSealed, SecretUnsealed, SecurityErrorV1, SecurityV1,
     UnsealedSecret,

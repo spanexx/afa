@@ -1,0 +1,31 @@
+[package]
+name = "afa-plugin-llm-http"
+version = "0.1.0"
+edition = "2021"
+description = "OpenAI-Responses-API LLM engine adapter (afa-plugin-llm-http)."
+license = "Apache-2.0"
+
+[dependencies]
+afa-contracts = { path = "../afa-contracts" }
+afa-llm = { path = "../afa-llm" }
+afa-security = { path = "../afa-security" }
+afa-bus = { path = "../afa-bus" }
+async-openai = "0.29"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "net", "io-util"] }
+tracing = "0.1"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+zeroize = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "test-util"] }
+# Used by the "never log secrets" integration test
+# (`never_log_secrets_captures_no_api_key_or_prompt_in_tracing`)
+# to install a `tracing` subscriber that writes to an
+# in-memory buffer.
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

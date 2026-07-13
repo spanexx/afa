@@ -19,6 +19,12 @@ tokio = { version = "1", features = ["rt", "sync", "macros"] }
 tracing = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
+# Used by `capability_registry::RegisterError` (the
+# "llm adapter already registered" closed-set). The
+# kernel itself is the only caller of `register_llm`,
+# so the error is a programmer-error, not a runtime
+# recovery path.
+thiserror = "1.0"
 # Pure-Rust hex decoder — used by `tests/boot_failures.rs`
 # `read_master_key_from_env` to lift the `AFA_MASTER_KEY`
 # env-var string into a `MasterKey` (via
@@ -32,6 +38,13 @@ hex = "0.4"
 tokio = { version = "1", features = ["rt", "sync", "macros", "time", "test-util"] }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
+# Used by the `capability_registry::tests::CountingAdapter`
+# fixture to implement `LlmV1` for the in-file
+# `CapabilityRegistry` unit tests. The fixture needs the
+# `#[async_trait]` macro to expand the async methods into
+# `Pin<Box<dyn Future + Send>>` (the trait is `#[async_trait]`
+# itself, so the impl must be too).
+async-trait = "0.1"
 # In-memory temp dirs for the `secrets.db` SQLite file in
 # the in-crate `Kernel::new` tests
 # (`crates/afa-kernel/src/kernel.rs`'s `fresh_kernel`

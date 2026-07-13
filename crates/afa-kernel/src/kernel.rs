@@ -30,6 +30,7 @@
 //!
 //! Quick lookup: rg -n "CID:kernel-" crates/afa-kernel/src/kernel.rs
 
+use crate::capability_registry::CapabilityRegistry;
 use crate::event_bus::{EventBus, EventBusHandle};
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
@@ -61,6 +62,19 @@ pub struct Kernel {
     scheduler: Arc<Scheduler>,
     event_bus: Arc<EventBus>,
     security: Arc<dyn SecurityV1>,
+    /// The capability registry. The slot
+    /// type is `CapabilityRegistry` (not
+    /// `Arc<CapabilityRegistry>`) because the
+    /// registry's only field is an
+    /// `Option<Arc<dyn LlmV1>>` — the `Arc` is
+    /// already shared. Cloning a
+    /// `CapabilityRegistry` is a tiny
+    /// refcount bump on the slot's `Option`.
+    /// The slot is a `Mutex` so a workflow
+    /// can call `register_llm` on one clone
+    /// and have the other clones see the
+    /// registration immediately.
+    capabilities: std::sync::Mutex<CapabilityRegistry>,
 }
 
 impl Kernel {
@@ -125,6 +139,7 @@ impl Kernel {
             scheduler,
             event_bus,
             security,
+            capabilities: std::sync::Mutex::new(CapabilityRegistry::new()),
         })
     }
 
@@ -185,13 +200,24 @@ impl Clone for Kernel {
     /// `SecurityEngine`; steps registered on one are
     /// immediately visible to the other, and a secret
     /// sealed on one is immediately unsealable on the
-    /// other.
+    /// other. The `CapabilityRegistry` is shared
+    /// across clones too — but the registry's
+    /// internal `Arc<dyn LlmV1>` is what is shared, so
+    /// a `register_llm` on one clone is visible to
+    /// the other immediately (the registry's slot is
+    /// not `Arc`'d; the slot's content is).
     fn clone(&self) -> Self {
+        let capabilities = self
+            .capabilities
+            .lock()
+            .expect("capabilities mutex")
+            .clone();
         Self {
             runtime: Runtime::new(Arc::clone(&self.scheduler), self.event_bus.handle()),
             scheduler: Arc::clone(&self.scheduler),
             event_bus: Arc::clone(&self.event_bus),
             security: Arc::clone(&self.security),
+            capabilities: std::sync::Mutex::new(capabilities),
         }
     }
 }

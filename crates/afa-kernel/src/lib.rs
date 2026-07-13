@@ -1,4 +1,7 @@
 //! Code Map: afa-kernel (the front door)
+//! - `capability_registry`: The small lookup table the
+//!   `Kernel` holds for plugin capabilities (currently
+//!   one slot: LLM). See `capability_registry.rs`.
 //! - `event_bus`: Re-export of the in-process pub/sub broker
 //!   from `afa-bus`. A publisher hands it an event, and every
 //!   subscriber that cares about that event type gets a copy.
@@ -9,9 +12,9 @@
 //!   `afa_kernel::event_bus::EventBus` working for
 //!   downstream code that was written before the split.
 //! - `kernel`: The top-level composition that owns the Runtime,
-//!   the Scheduler, the Event Bus, and the Security Engine
-//!   (all wrapped in `Arc`s so cloning is cheap). See
-//!   `kernel.rs`.
+//!   the Scheduler, the Event Bus, the Security Engine, and
+//!   the CapabilityRegistry (all wrapped in `Arc`s so cloning
+//!   is cheap). See `kernel.rs`.
 //! - `runtime`: The single entry point (`ingest`) that turns a
 //!   raw event into a fully-dispatched unit of work. See
 //!   `runtime.rs`.
@@ -24,6 +27,9 @@
 //!   `use afa_kernel::Kernel` without reaching into a submodule.
 //! - `Step`: Re-exported at the crate root as the public shape of
 //!   a workflow step.
+//! - `LlmV1`: Re-export of the LLM-adapter trait so
+//!   `register_llm` callers can name the trait without
+//!   importing `afa-contracts` directly.
 //!
 //! Story (plain English): This file is the front door of the
 //! kernel crate. The kernel is the heartbeat of AFA: it takes
@@ -38,17 +44,28 @@
 //! database. It is the post office: it routes, it does not decide.
 //!
 //! CID Index:
-//! CID:afa-kernel-lib-001 -> event_bus (re-export of afa-bus)
-//! CID:afa-kernel-lib-002 -> kernel
-//! CID:afa-kernel-lib-003 -> runtime
-//! CID:afa-kernel-lib-004 -> scheduler
-//! CID:afa-kernel-lib-005 -> crate-root re-exports
+//! CID:afa-kernel-lib-001 -> capability_registry
+//! CID:afa-kernel-lib-002 -> event_bus (re-export of afa-bus)
+//! CID:afa-kernel-lib-003 -> kernel
+//! CID:afa-kernel-lib-004 -> runtime
+//! CID:afa-kernel-lib-005 -> scheduler
+//! CID:afa-kernel-lib-006 -> crate-root re-exports
 //!
 //! Quick lookup: rg -n "CID:afa-kernel-lib-" crates/afa-kernel/src/lib.rs
 
 #![doc(html_root_url = "https://docs.rs/afa-kernel/0.1.0")]
 
-// CID:afa-kernel-lib-001 - event_bus (re-export of afa-bus)
+// CID:afa-kernel-lib-001 - capability_registry
+// Purpose: The small lookup table the `Kernel`
+// holds for plugin capabilities (currently one
+// slot: LLM). The `register_llm` method inserts
+// the adapter; `Kernel::capabilities` hands a
+// read-only view to workflows.
+// Used by: `Kernel` (composes the registry),
+// workflows that call `llm.complete` /
+// `llm.stream_complete`.
+pub mod capability_registry;
+// CID:afa-kernel-lib-002 - event_bus (re-export of afa-bus)
 // Purpose: Re-export the in-process pub/sub broker module
 // from `afa-bus` so downstream code that was written
 // before the Phase 3 split (which extracted the bus
@@ -63,20 +80,21 @@
 // `Runtime` (publishes `EventReceived`), `Scheduler`
 // (hands steps an `EventBusHandle`).
 pub use afa_bus as event_bus;
-// CID:afa-kernel-lib-002 - kernel
+// CID:afa-kernel-lib-003 - kernel
 // Purpose: Re-export the top-level composition (Runtime +
-// Scheduler + Event Bus + Security Engine, all `Arc`-backed,
-// cheaply `Clone`-able).
+// Scheduler + Event Bus + Security Engine +
+// CapabilityRegistry, all `Arc`-backed, cheaply
+// `Clone`-able).
 // Used by: every consumer of the kernel; this is the type most
 // callers will hold and pass around.
 pub mod kernel;
-// CID:afa-kernel-lib-003 - runtime
+// CID:afa-kernel-lib-004 - runtime
 // Purpose: Re-export the single ingress point (`Runtime::ingest`)
 // that turns a raw event into a dispatched unit of work and
 // returns the new correlation ID.
 // Used by: every external caller (channel plugins, tests).
 pub mod runtime;
-// CID:afa-kernel-lib-004 - scheduler
+// CID:afa-kernel-lib-005 - scheduler
 // Purpose: Re-export the dispatcher that finds every registered
 // step for an event type and runs them concurrently with panic
 // isolation.
@@ -84,7 +102,7 @@ pub mod runtime;
 // workflow-engine authors (register steps at startup).
 pub mod scheduler;
 
-// CID:afa-kernel-lib-005 - crate-root re-exports
+// CID:afa-kernel-lib-006 - crate-root re-exports
 // Purpose: Re-export the two types downstream consumers
 // reach for most often (a `Kernel` to construct and pass
 // around, and a `Step` to register on a scheduler) at
@@ -92,5 +110,7 @@ pub mod scheduler;
 // without reaching into a submodule. This is the
 // public-API boundary: anything not re-exported here is
 // not part of the contract.
+pub use afa_contracts::LlmV1;
+pub use capability_registry::{CapabilityRegistry, RegisterError};
 pub use kernel::Kernel;
 pub use scheduler::Step;

@@ -7,3 +7,6 @@
 
 # OS
 .DS_Store
+
+# Agent tooling state (not part of the product)
+/.task-manager/
