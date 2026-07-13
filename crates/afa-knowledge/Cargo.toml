@@ -1,0 +1,29 @@
+[package]
+name = "afa-knowledge"
+version = "0.1.0"
+edition = "2021"
+description = "Vendor-neutral Knowledge engine capability and conformance suite for AFA."
+license = "Apache-2.0"
+
+# CID:afa-knowledge-cargo-001 - dependencies
+# Purpose: The v1 dependency list. `afa-contracts` for the
+# `KnowledgeV1` trait and the 9 supporting types; `async-trait`
+# for the `#[async_trait]` macro on the conformance helpers;
+# `tokio` for the `#[tokio::test]` and the `async` runtime
+# the conformance suite runs on. The conformance suite in
+# Phase 2 holds a `MockAdapter` behind `Arc<dyn KnowledgeV1>`
+# and runs `tokio::spawn`-friendly scenarios; the
+# `["rt", "rt-multi-thread", "sync", "macros", "time"]`
+# feature set is the minimum that supports both single-
+# threaded and multi-threaded test runs.
+[dependencies]
+afa-contracts = { path = "../afa-contracts" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time"] }
+
+# CID:afa-knowledge-cargo-002 - dev-dependencies
+# Purpose: The dev-only test extras. `tokio` is duplicated
+# with the `test-util` feature so the test binary can use
+# `tokio::test::yield_now()` and friends.
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }

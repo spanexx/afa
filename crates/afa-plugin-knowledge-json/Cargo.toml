@@ -1,0 +1,44 @@
+[package]
+name = "afa-plugin-knowledge-json"
+version = "0.1.0"
+edition = "2021"
+description = "JSON + Markdown storage adapter for the AFA Knowledge engine."
+license = "Apache-2.0"
+
+# CID:afa-plugin-knowledge-json-cargo-001 - dependencies
+# Purpose: The v1 dependency list. `afa-contracts` for
+# the `KnowledgeV1` trait and the 9 supporting types;
+# `async-trait` for the trait impl; `thiserror` for
+# the adapter-internal error type (Phase 1 will add
+# one, Phase 0 declares the dep so the skeleton
+# compiles); `serde` + `serde_json` for the
+# `.index.json` serialization; `tracing` for the
+# metadata-only logging rule (no record content, no
+# free-text query); `chrono` for `DateTime<Utc>`;
+# `tokio` for the async filesystem; `uuid` for the
+# `RecordId` generation (version pinned in workspace
+# to keep all crates on the same uuid release).
+# The Phase 1+ write path uses `tokio::fs::*` for
+# atomic write + `fsync` + parent-dir `fsync`.
+[dependencies]
+afa-contracts = { path = "../afa-contracts" }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "rt", "rt-multi-thread", "sync", "macros", "time"] }
+tracing = "0.1"
+uuid = { workspace = true }
+
+# CID:afa-plugin-knowledge-json-cargo-002 - dev-dependencies
+# Purpose: Dev-only test extras. `tempfile` gives
+# each test a clean per-test storage root (the
+# "no live filesystem in tests" rule); `proptest`
+# covers the `.index.json` serialization
+# round-trip; `tokio-test` is the `tokio::test`
+# macro the integration tests will use.
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = { workspace = true }
+tokio = { version = "1", features = ["fs", "rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }

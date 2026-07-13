@@ -29,9 +29,11 @@
 //!
 //! Quick lookup: rg -n "CID:capability-registry-" crates/afa-kernel/src/capability_registry.rs
 
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use afa_contracts::LlmV1;
+use afa_contracts::{KnowledgeV1, LlmV1};
 use thiserror::Error;
 
 // CID:capability-registry-001 - CapabilityRegistry
@@ -74,13 +76,31 @@ pub struct CapabilityRegistry {
     /// until `register_llm` is called at
     /// startup.
     llm: Option<Arc<dyn LlmV1>>,
+    /// The registered Knowledge adapters,
+    /// keyed by a `String` (typically
+    /// `"default"` for a single-tenant
+    /// deployment, or one entry per tenant
+    /// id in a multi-tenant deployment).
+    /// The value is `(adapter,
+    /// storage_root)`: the adapter is the
+    /// thing the workflow calls
+    /// `find_information` /
+    /// `store_information` /
+    /// `list_topics` on; the
+    /// `storage_root: PathBuf` is retained
+    /// for diagnostics only (the
+    /// accessor `knowledge(key)` does not
+    /// hand back the path; a future
+    /// health-check surface will).
+    knowledge: HashMap<String, (Arc<dyn KnowledgeV1>, PathBuf)>,
 }
 
 /// The "could not register" reasons. The
-/// closed set is small — the registry
-/// only has one slot — and the error is
-/// typed so a workflow can branch on the
-/// reason (not on a string).
+/// closed set is small — the LLM registry
+/// has one slot, the Knowledge registry is
+/// keyed — and the error is typed so a
+/// workflow can branch on the reason (not
+/// on a string).
 #[derive(Debug, Error)]
 pub enum RegisterError {
     /// The LLM slot is already occupied.
@@ -89,6 +109,17 @@ pub enum RegisterError {
     /// constructor is the only caller).
     #[error("llm adapter already registered")]
     LlmAlreadyRegistered,
+    /// A `register_knowledge` call tried to
+    /// register under a `key` that is
+    /// already occupied. A second register
+    /// under the same key is a programmer
+    /// error (the kernel constructor is the
+    /// only caller); a multi-tenant
+    /// deployment should use one key per
+    /// tenant id, not re-register the
+    /// default key.
+    #[error("knowledge adapter already registered under key `{key}`")]
+    KnowledgeAlreadyRegistered { key: String },
 }
 
 impl CapabilityRegistry {
@@ -135,16 +166,68 @@ impl CapabilityRegistry {
     pub fn llm(&self) -> Option<Arc<dyn LlmV1>> {
         self.llm.clone()
     }
+
+    // CID:capability-registry-004 - register_knowledge
+    // Purpose: Insert a Knowledge storage adapter
+    // under a `String` key (typically
+    // `"default"`, `"tenant-a"`, etc.). Returns
+    // `Err(RegisterError::KnowledgeAlreadyRegistered
+    // { key })` if a second adapter is registered
+    // under the same key. The Knowledge
+    // registry is keyed (not a single slot) so
+    // a multi-tenant deployment can hold one
+    // adapter per tenant under the tenant id
+    // as the key. The `storage_root: PathBuf` is
+    // retained for diagnostics only (the
+    // accessor `knowledge(key)` does not hand
+    // back the path; a future health-check
+    // surface will).
+    // Uses: KnowledgeV1, PathBuf.
+    // Used by: `Kernel::new` (or a tenant
+    // registration bootstrap path) to attach
+    // one or more Knowledge adapters.
+    pub fn register_knowledge(
+        &mut self,
+        key: impl Into<String>,
+        adapter: Arc<dyn KnowledgeV1>,
+        storage_root: PathBuf,
+    ) -> Result<(), RegisterError> {
+        let key = key.into();
+        if self.knowledge.contains_key(&key) {
+            return Err(RegisterError::KnowledgeAlreadyRegistered { key });
+        }
+        self.knowledge.insert(key, (adapter, storage_root));
+        Ok(())
+    }
+
+    // CID:capability-registry-005 - knowledge
+    // Purpose: Hand back a clone of the
+    // `Arc<dyn KnowledgeV1>` stored under the
+    // given key. Returns `None` if no adapter
+    // was registered under that key (the
+    // workflow branches on `None` and
+    // surfaces a clear "no Knowledge configured
+    // for this tenant" error).
+    // Uses: KnowledgeV1.
+    // Used by: every workflow that calls
+    // `knowledge.find_information` /
+    // `knowledge.store_information` /
+    // `knowledge.list_topics`.
+    pub fn knowledge(&self, key: &str) -> Option<Arc<dyn KnowledgeV1>> {
+        self.knowledge.get(key).map(|(adapter, _)| adapter.clone())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use afa_contracts::{
-        CompletionRequest, CompletionResponse, CompletionStream, ExecutionContext, LlmErrorV1,
-        LlmV1, ModelCapabilities,
+        CompletionRequest, CompletionResponse, CompletionStream, ExecutionContext,
+        FindInformationRequest, FindInformationResponse, KnowledgeCapabilities, KnowledgeErrorV1,
+        KnowledgeRecordInput, KnowledgeV1, LlmErrorV1, LlmV1, ModelCapabilities, RecordId, Topic,
     };
     use async_trait::async_trait;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A no-op `LlmV1` that records
@@ -284,5 +367,222 @@ mod tests {
         };
         let _resp = llm.complete(req, &ctx).await.expect("complete");
         assert_eq!(adapter.count.load(Ordering::SeqCst), 1);
+    }
+
+    /// A no-op `KnowledgeV1` that records
+    /// every call. Used to assert the
+    /// registry hands out the same
+    /// adapter to every caller. Mirrors
+    /// the `CountingAdapter` pattern for
+    /// the LLM registry above. The
+    /// methods return canned responses
+    /// (empty result list, new
+    /// `RecordId`, empty topic list,
+    /// fixed capabilities) — the Phase
+    /// 0 tests only assert on the
+    /// call counter, not on the
+    /// response shape.
+    struct CountingKnowledgeAdapter {
+        count: AtomicU32,
+    }
+
+    #[async_trait]
+    impl KnowledgeV1 for CountingKnowledgeAdapter {
+        async fn find_information(
+            &self,
+            _request: FindInformationRequest,
+            _ctx: &ExecutionContext,
+        ) -> Result<FindInformationResponse, KnowledgeErrorV1> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+        async fn store_information(
+            &self,
+            _record: KnowledgeRecordInput,
+            _ctx: &ExecutionContext,
+        ) -> Result<RecordId, KnowledgeErrorV1> {
+            // The Phase 0 conformance test does
+            // not call `store_information`; the
+            // unimplemented panic is the
+            // contract for "this method is
+            // stubbed in the Phase 0 mock."
+            // Phase 1+ adapter tests live in
+            // `afa-plugin-knowledge-json`.
+            unimplemented!("counting mock; Phase 1+ uses the real adapter")
+        }
+        async fn list_topics(
+            &self,
+            _ctx: &ExecutionContext,
+        ) -> Result<Vec<Topic>, KnowledgeErrorV1> {
+            Ok(Vec::new())
+        }
+        fn describe_capabilities(&self) -> KnowledgeCapabilities {
+            KnowledgeCapabilities {
+                max_record_size_bytes: 1_048_576,
+                supports_semantic_search: false,
+                supports_hierarchical_topics: false,
+            }
+        }
+    }
+
+    #[test]
+    fn empty_registry_has_no_knowledge() {
+        // A freshly built registry
+        // returns `None` from
+        // `.knowledge("default")`.
+        // The workflow case
+        // "no Knowledge configured
+        // for this tenant" starts
+        // here.
+        let r = CapabilityRegistry::new();
+        assert!(r.knowledge("default").is_none());
+        assert!(r.knowledge("tenant-a").is_none());
+    }
+
+    #[test]
+    fn register_knowledge_then_knowledge_returns_the_same_arc() {
+        // After `register_knowledge`,
+        // the registry's
+        // `.knowledge(key)` hands back
+        // an `Arc` that points to the
+        // same adapter. The
+        // `CountingKnowledgeAdapter
+        // ::count` is the only field
+        // — a different adapter would
+        // have its own `count`. Bound
+        // as `Arc<dyn KnowledgeV1>` so
+        // the stored value and the
+        // retrieved value share the
+        // same concrete type (required
+        // for `Arc::ptr_eq`).
+        let adapter: Arc<dyn KnowledgeV1> = Arc::new(CountingKnowledgeAdapter {
+            count: AtomicU32::new(0),
+        });
+        let mut r = CapabilityRegistry::new();
+        r.register_knowledge("default", adapter.clone(), PathBuf::from("/tmp/knowledge"))
+            .expect("register");
+        let got = r.knowledge("default").expect("knowledge");
+        // `register_knowledge` stored
+        // the adapter, and
+        // `knowledge` returned a
+        // clone of the same `Arc`.
+        // The pointer-equality check
+        // is the assertion of intent
+        // (it is the same
+        // allocation), independent
+        // of how many intermediate
+        // Arcs were held by the
+        // call stack.
+        assert!(Arc::ptr_eq(&adapter, &got));
+    }
+
+    #[test]
+    fn second_register_knowledge_call_fails() {
+        // A second `register_knowledge`
+        // under the same key is a
+        // programmer error (the
+        // kernel constructor is the
+        // only caller). The registry
+        // surfaces it as
+        // `KnowledgeAlreadyRegistered
+        // { key }` (not a panic).
+        let adapter1: Arc<dyn KnowledgeV1> = Arc::new(CountingKnowledgeAdapter {
+            count: AtomicU32::new(0),
+        });
+        let adapter2: Arc<dyn KnowledgeV1> = Arc::new(CountingKnowledgeAdapter {
+            count: AtomicU32::new(0),
+        });
+        let mut r = CapabilityRegistry::new();
+        r.register_knowledge("default", adapter1, PathBuf::from("/tmp/a"))
+            .expect("first");
+        let e = r
+            .register_knowledge("default", adapter2, PathBuf::from("/tmp/b"))
+            .expect_err("second");
+        // The error carries the
+        // conflicting key for the
+        // operator log.
+        match e {
+            RegisterError::KnowledgeAlreadyRegistered { key } => {
+                assert_eq!(key, "default")
+            }
+            other => panic!("expected KnowledgeAlreadyRegistered, got {other:?}"),
+        }
+        // The first adapter is
+        // still the one the
+        // registry hands out (the
+        // second call did NOT
+        // overwrite).
+        let _got = r.knowledge("default").expect("knowledge");
+    }
+
+    #[test]
+    fn knowledge_registry_supports_multiple_keys() {
+        // The Knowledge registry
+        // is keyed (not a single
+        // slot) so a multi-tenant
+        // deployment can hold one
+        // adapter per tenant under
+        // the tenant id as the key.
+        // Different keys must hold
+        // different adapters; the
+        // same key is a
+        // `KnowledgeAlreadyRegistered`
+        // (covered above).
+        let adapter_a: Arc<dyn KnowledgeV1> = Arc::new(CountingKnowledgeAdapter {
+            count: AtomicU32::new(0),
+        });
+        let adapter_b: Arc<dyn KnowledgeV1> = Arc::new(CountingKnowledgeAdapter {
+            count: AtomicU32::new(0),
+        });
+        let mut r = CapabilityRegistry::new();
+        r.register_knowledge("tenant-a", adapter_a.clone(), PathBuf::from("/tmp/a"))
+            .expect("a");
+        r.register_knowledge("tenant-b", adapter_b.clone(), PathBuf::from("/tmp/b"))
+            .expect("b");
+        let got_a = r.knowledge("tenant-a").expect("a");
+        let got_b = r.knowledge("tenant-b").expect("b");
+        assert!(Arc::ptr_eq(&adapter_a, &got_a));
+        assert!(Arc::ptr_eq(&adapter_b, &got_b));
+        // The two adapters are
+        // independent allocations
+        // (different `Arc`s).
+        assert!(!Arc::ptr_eq(&got_a, &got_b));
+    }
+
+    #[tokio::test]
+    async fn handed_out_knowledge_adapter_is_callable() {
+        // The end-to-end shape: a
+        // workflow gets the
+        // `Arc<dyn KnowledgeV1>`,
+        // calls `find_information`
+        // on it, and the adapter's
+        // `count` increments. This
+        // is the proof that the
+        // registry hands out a
+        // real, callable adapter
+        // (not a stub).
+        //
+        // The concrete `Arc<CountingKnowledgeAdapter>`
+        // is held alongside the
+        // `Arc<dyn KnowledgeV1>` so the
+        // counter field is accessible
+        // after the `register_knowledge`
+        // call (which converts to the
+        // trait object).
+        let concrete = Arc::new(CountingKnowledgeAdapter {
+            count: AtomicU32::new(0),
+        });
+        let adapter: Arc<dyn KnowledgeV1> = concrete.clone();
+        let mut r = CapabilityRegistry::new();
+        r.register_knowledge("default", adapter, PathBuf::from("/tmp/knowledge"))
+            .expect("register");
+        let knowledge = r.knowledge("default").expect("knowledge");
+        let ctx = ExecutionContext::new(
+            afa_contracts::TenantId::new("t"),
+            afa_contracts::Actor::Timer,
+        );
+        let req = FindInformationRequest::default();
+        let _resp = knowledge.find_information(req, &ctx).await.expect("find");
+        assert_eq!(concrete.count.load(Ordering::SeqCst), 1);
     }
 }

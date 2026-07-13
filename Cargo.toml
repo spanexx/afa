@@ -9,6 +9,8 @@ members = [
     "crates/afa-llm",
     "crates/afa-plugin-llm-http",
     "crates/afa-plugin-llm-chat-completions",
+    "crates/afa-knowledge",
+    "crates/afa-plugin-knowledge-json",
 ]
 
 [workspace.dependencies]
@@ -19,3 +21,16 @@ members = [
 # a `Stream<Item = Result<Event, _>>` of typed
 # SSE events.
 eventsource-stream = "0.2"
+
+# Pinned deps for the Knowledge engine
+# (pack #5). All three are dev-deps of
+# `afa-plugin-knowledge-json` (tempfile for
+# per-test storage roots, proptest for the
+# `.index.json` serialization round-trip).
+# `uuid` is a direct dep of
+# `afa-plugin-knowledge-json` for `RecordId`
+# generation; pinned to the version the
+# `afa-contracts` crate already resolves to.
+uuid = "1.23.4"
+tempfile = "3.27.0"
+proptest = "1.11.0"

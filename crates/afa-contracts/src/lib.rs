@@ -71,6 +71,40 @@ pub mod ids;
 // the trait) and every workflow that calls `llm.complete` /
 // `llm.stream_complete`.
 pub mod llm;
+
+// CID:afa-contracts-lib-008 - knowledge
+// Purpose: Re-export the v1 Knowledge engine contract: the
+// trait (`KnowledgeV1`), the record shape
+// (`KnowledgeRecord`, `RecordId`, `KnowledgeRecordInput`),
+// the query shape (`FindInformationRequest`,
+// `FindInformationResponse`), the topic summary (`Topic`),
+// the capabilities card (`KnowledgeCapabilities`), the 5
+// typed errors (`KnowledgeErrorV1`, `KnowledgeErrorKind`),
+// and the two audit events (`KnowledgeQueried`,
+// `KnowledgeRecordStored`). See `knowledge/mod.rs` for the
+// Code Map.
+// Used by: the `afa-knowledge` engine (the conformance
+// suite), the `afa-plugin-knowledge-json` adapter (the first
+// concrete implementation), and every workflow that calls
+// `knowledge.find_information` /
+// `knowledge.store_information` / `knowledge.list_topics`.
+pub mod knowledge;
+
+// CID:afa-contracts-lib-009 - bus types
+// Purpose: Re-export the LLM + Knowledge contract surface
+// so consumers can write `use afa_contracts::KnowledgeV1`
+// / `use afa_contracts::LlmV1` rather than reaching into
+// the `llm::*` or `knowledge::*` submodules. The
+// `find_information` / `store_information` methods take
+// `ExecutionContext` (from `execution_context.rs`) and
+// return `AfaError` / `AfaErrorKind` (from `error.rs`).
+// Used by: every adapter and engine crate that implements
+// or calls the v1 contracts.
+pub use knowledge::{
+    FindInformationRequest, FindInformationResponse, KnowledgeCapabilities, KnowledgeErrorKind,
+    KnowledgeErrorV1, KnowledgeQueried, KnowledgeRecord, KnowledgeRecordInput,
+    KnowledgeRecordStored, KnowledgeV1, RecordId, Topic,
+};
 // CID:afa-contracts-lib-006 - security
 // Purpose: Re-export the v1 security engine contract: the trait,
 // the receipt, the zeroing handle, the error type, and the
