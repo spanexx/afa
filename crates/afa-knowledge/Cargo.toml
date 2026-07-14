@@ -25,5 +25,31 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", 
 # Purpose: The dev-only test extras. `tokio` is duplicated
 # with the `test-util` feature so the test binary can use
 # `tokio::test::yield_now()` and friends.
+# `afa-plugin-knowledge-json` is the v1 concrete
+# Knowledge storage adapter; the Phase 4
+# conformance suite in
+# `tests/knowledge_v1.rs` runs against the real
+# adapter in addition to the in-crate
+# `MockAdapter` (proves the suite is not
+# over-fitted to the mock). `tempfile` is the
+# per-test storage root the real adapter boots
+# from.
 [dev-dependencies]
+afa-plugin-knowledge-json = { path = "../afa-plugin-knowledge-json" }
+# Phase 4: the `run_conformance_suite` is run
+# against the real `JsonKnowledgeAdapter`
+# (in addition to the in-crate
+# `MockAdapter`); the real adapter needs a
+# real `EventBus` to publish the
+# audit events, and uses `uuid::Uuid` to
+# parse the on-disk record filename.
+afa-bus = { path = "../afa-bus" }
+tempfile = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "time", "test-util"] }
+# Phase 4: parse the on-disk record filename
+# (`<record_id>.md`) in the
+# `knowledge_v1_conformance_suite_against_json_adapter`
+# test to confirm the on-disk side effect of
+# the conformance suite's canned
+# `store_information` call.
+uuid = { workspace = true }

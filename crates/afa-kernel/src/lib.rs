@@ -103,14 +103,23 @@ pub mod runtime;
 pub mod scheduler;
 
 // CID:afa-kernel-lib-006 - crate-root re-exports
-// Purpose: Re-export the two types downstream consumers
-// reach for most often (a `Kernel` to construct and pass
-// around, and a `Step` to register on a scheduler) at
-// the crate root, so callers can `use afa_kernel::Kernel`
+// Purpose: Re-export the three types downstream
+// consumers reach for most often (a `Kernel` to
+// construct and pass around, a `Step` to register
+// on a scheduler, and the two trait-object views
+// for the `CapabilityRegistry` slots) at the crate
+// root, so callers can `use afa_kernel::Kernel`
 // without reaching into a submodule. This is the
-// public-API boundary: anything not re-exported here is
-// not part of the contract.
-pub use afa_contracts::LlmV1;
+// public-API boundary: anything not re-exported
+// here is not part of the contract. `LlmV1` and
+// `KnowledgeV1` are the trait objects the
+// `register_llm` / `register_knowledge` callers
+// name when they hand an adapter to the kernel —
+// re-exporting them at the crate root lets
+// downstream code stay on the
+// `afa_kernel::KnowledgeV1` path rather than
+// reaching into `afa_contracts` directly.
+pub use afa_contracts::{KnowledgeV1, LlmV1};
 pub use capability_registry::{CapabilityRegistry, RegisterError};
 pub use kernel::Kernel;
 pub use scheduler::Step;

@@ -1,133 +1,143 @@
-# Handoff — Pack #5 (Knowledge Engine) Phase 3 complete
+# Handoff — Pack #5 (Knowledge Engine) Phase 4 complete
 
 ## What was done
 
-**Phase 3 (Resilience) of Pack #5
+**Phase 4 (Integration + docs) of Pack #5
 (`knowledge-engine-json-store`) is
-code-complete.** The on-disk `.index.json` is
-now persisted; the adapter boots cleanly from a
-fresh `tempfile::TempDir`, recovers from a
-corrupt `.index.json` by rebuilding from the
-on-disk `.md` files (with a `tracing::warn!`),
-and cleans up any orphan `*.tmp.*` files left
-behind by a crashed previous process. The
-`content_tokens` lazy cache is now evicted on
-every `store_information` (the Phase 2
-"stale-cache" decision). The conformance suite
-is extended with 4 audit-event tests and the
-proptest round-trip suite covers all 9
-Knowledge types (256 cases per type).
+code-complete.** A real `Kernel` now boots
+with a real `JsonKnowledgeAdapter` against a
+`tempfile::TempDir`, runs end-to-end
+`find_information` + `store_information` +
+`list_topics` calls, and the `EventBus`
+publishes the 3 audit events with matching
+`correlation_id`. The conformance suite in
+`afa-knowledge` runs against both the
+in-crate `MockAdapter` AND the real
+`JsonKnowledgeAdapter`. The
+`docs/engines/Knowledge.md` and
+`docs/CONTEXT.md` are re-aligned with the
+on-disk reality (per-record `.md` files in
+per-topic folders + a single
+`<root>/.index.json`). A new
+`docs/plugins/KnowledgeJson.md` mirrors
+`docs/plugins/LlmHttp.md`.
 
 ## Where the work landed
 
 **New files:**
 
-- `crates/afa-plugin-knowledge-json/src/index_file.rs` —
-  the on-disk index format. `IndexFileV1` is
-  `serde::Serialize` + `serde::Deserialize`,
-  `schema_version: u32 = 1`, `topics:
-  BTreeMap<String, TopicFile>` (with
-  `record_count`, `first_record_at`,
-  `last_record_at`, `tag_count`), and
-  `records: BTreeMap<Uuid, RecordFile>` (with
-  `topic`, `tags`, `source`, `created_at`,
-  `file_path`, `size_bytes`). Three
-  `pub async fn` helpers:
-  `load(storage_root) -> LoadOutcome`,
-  `save(storage_root, &InMemoryIndex) ->
-  Result<(), io::Error>`, and
-  `rebuild_from_disk(storage_root) ->
-  Result<InMemoryIndex, io::Error>`. The
-  `LoadOutcome` enum is
-  `Loaded(InMemoryIndex) | Missing | Corrupt
-  { reason: String }`. The `save()` helper
-  uses the atomic-write pattern (temp file
-  in the same directory + rename + parent
-  fsync) — same guarantee as the record
-  write path. The `rebuild_from_disk()` walker
-  is best-effort: it walks every
-  `<storage_root>/<topic_slug>/` directory,
-  parses the `record_id` from the `.md`
-  filename, and rebuilds the in-memory
-  `topics` + `tag_index` + `slug_to_topic`
-  structures.
-- `crates/afa-plugin-knowledge-json/tests/adapter_crash_safety.rs` —
-  2 tests: (1) `boot_with_corrupt_index_json_rebuilds_from_disk`
-  — writes a junk `.index.json` and a valid
-  on-disk record, boots, asserts the adapter
-  warns and the record is visible;
-  (2) `boot_cleans_up_orphan_temp_files` —
-  drops 3 `*.md.tmp.<uuid>` files into the
-  storage root, boots, asserts they are
-  removed.
-- `crates/afa-plugin-knowledge-json/tests/adapter_concurrency.rs` —
-  1 test: `concurrent_store_information_same_topic`
-  — 100 parallel `store_information` calls
-  (gated by a `tokio::sync::Barrier`), then
-  asserts (a) all 100 return `Ok`,
-  (b) `find_information` returns all 100
-  records, (c) all 100 `RecordId`s are
-  unique, (d) the on-disk `.index.json`
-  contains all 100 (re-boot, re-verify).
-- `crates/afa-plugin-knowledge-json/tests/proptest_round_trips.rs` —
-  9 `proptest!` properties, 256 cases each:
-  `KnowledgeRecord`, `RecordId`,
-  `FindInformationRequest`, `FindInformationResponse`,
-  `Topic`, `KnowledgeCapabilities`,
-  `KnowledgeErrorV1` (all 5 variants via
-  `prop_oneof!`), `KnowledgeQueried`,
-  `KnowledgeRecordStored`. Each property
-  serializes to `serde_json` + back and
-  asserts equality.
-- `crates/afa-plugin-knowledge-json/tests/adapter_events.rs` —
-  4 tests:
-  (1) `queried_event_does_not_leak_free_text` —
-  `find_information` with
-  `free_text = "sensitive_query_xyzzy"`,
-  assert the captured `KnowledgeQueried`
-  event's `serde_json` does not contain
-  `"sensitive_query_xyzzy"`.
-  (2) `stored_event_does_not_leak_content` —
-  `store_information` with content
-  `"sensitive_content_xyzzy"`, assert the
-  captured `KnowledgeRecordStored` event's
-  `serde_json` does not contain that string.
-  (3) `queried_event_fires_on_empty_result` —
-  `find_information` with no matches still
-  publishes one `KnowledgeQueried` event.
-  (4) `stored_event_fires_after_index_writes` —
-  the adapter only publishes
-  `KnowledgeRecordStored` after
-  `.index.json` is durable (asserted by
-  inspecting the on-disk file before
-  subscription receives the event).
+- `crates/afa-kernel/tests/knowledge_integration.rs` —
+  5 end-to-end tests that wire a real
+  `Kernel` + real `CapabilityRegistry` +
+  real `JsonKnowledgeAdapter` over a real
+  `EventBus`:
+  (1) `store_then_find_round_trip` —
+  `store_information` then
+  `find_information` returns the new
+  record with the expected shape.
+  (2) `list_topics_empty_then_after_store` —
+  empty list before any store, then one
+  topic after one store.
+  (3) `store_find_list_round_trip` — the
+  full FLOW doc sequence; verifies the 3
+  events are published with matching
+  `correlation_id`.
+  (4) `describe_capabilities_is_static` —
+  the JSON adapter's reported capabilities
+  are stable + match the locked
+  `KnowledgeCapabilities` shape.
+  (5) `kernel_without_knowledge_returns_error` —
+  `Kernel::knowledge("default")` returns
+  `Err(KernelError::NoKnowledgeAdapter)`
+  if `register_knowledge()` was never
+  called.
+- `docs/plugins/KnowledgeJson.md` —
+  mirrors `docs/plugins/LlmHttp.md`
+  (Purpose / Responsibilities /
+  Capability Reporting / What Changes
+  Here vs. Elsewhere / Configuration /
+  Boot Resilience).
 
 **Modified files:**
 
-- `crates/afa-plugin-knowledge-json/src/adapter.rs` —
-  `store_information` now writes the
-  in-memory index to `.index.json` via
-  `index_file::save()` after updating the
-  in-memory state. `new()` calls
-  `index_file::load()` and dispatches on
-  the `LoadOutcome`: `Missing` → empty index
-  + `tracing::info!`; `Corrupt { reason }` →
-  `tracing::warn!` + `rebuild_from_disk()`.
-  `read_to_string` failures on a record
-  file are now mapped to `MalformedRecord`
-  (was `StorageUnavailable`). The
-  `content_tokens` cache entry is evicted
-  on every `store_information` call.
-- `crates/afa-plugin-knowledge-json/src/index.rs` —
-  `InMemoryIndex` gained the `Debug` derive
-  (needed for `LoadOutcome`'s `Debug`).
-  `add_record()` signature now takes
-  `(input: &KnowledgeRecordInput, slug:
-  &str, record_id: RecordId, size_bytes:
-  u64)` so the on-disk `RecordFile` has the
-  full set of fields it needs.
-- `crates/afa-plugin-knowledge-json/src/lib.rs` —
-  re-exports the new `index_file` module.
+- `crates/afa-kernel/src/kernel.rs` —
+  `Kernel` gained `register_knowledge()`
+  + `knowledge()` accessors. The
+  `Kernel::knowledge(key)` method is
+  symmetric to `Kernel::llm(key)`: returns
+  `Arc<dyn KnowledgeV1>` and propagates
+  the underlying `CapabilityRegistry`
+  error (`KernelError::NoKnowledgeAdapter`
+  if the capability was never registered,
+  `KernelError::UnknownKnowledgeKey { key }`
+  if the key is unknown).
+- `crates/afa-kernel/src/lib.rs` —
+  re-exports `KnowledgeV1` (mirroring the
+  `LlmV1` re-export pattern, so
+  downstream code can `use afa_kernel::
+  {Kernel, KnowledgeV1}` without
+  touching `afa-contracts`).
+- `crates/afa-kernel/Cargo.toml` —
+  added `afa-plugin-knowledge-json` as
+  a `dev-dependency` (the real adapter
+  is needed for the integration test;
+  a test-only `MockAdapter` is not
+  enough — see `PHILOSOPHY.md` "Test
+  the engine, not the harness").
+- `crates/afa-knowledge/Cargo.toml` —
+  added `afa-plugin-knowledge-json` as
+  a `dev-dependency`, plus `afa-bus`
+  (the real adapter needs a real
+  `EventBus` to publish the audit
+  events) and `uuid` (the real-impl
+  conformance test parses the on-disk
+  `<record_id>.md` filename to assert
+  the on-disk side effect of the
+  conformance suite's canned
+  `store_information` call).
+- `crates/afa-knowledge/tests/knowledge_v1.rs` —
+  extended with 1 new test:
+  `knowledge_v1_conformance_suite_against_json_adapter`
+  — runs `run_conformance_suite` against
+  the real `JsonKnowledgeAdapter` (not
+  just the in-crate `MockAdapter`) and
+  asserts the on-disk side effect
+  (the `<record_id>.md` file is on disk
+  after the canned `store_information`
+  call, and `<storage_root>/.index.json`
+  is parseable JSON with `schema_version:
+  1`).
+- `docs/engines/Knowledge.md` — re-aligned
+  the on-disk layout section (per-record
+  `.md` files in per-topic folders, not
+  per-topic `.md` files), the
+  `LoadOutcome` dispatch (Loaded /
+  Missing / Corrupt + rebuild), the
+  orphan-temp cleanup at boot, the
+  `KnowledgeRecordInput` vs.
+  `KnowledgeRecord` split (writer's
+  view vs. reader's view, per TRD
+  §2.2.2), and the
+  `KnowledgeTopicsListed` event.
+- `docs/CONTEXT.md` — added
+  `KnowledgeRecordInput` (distinct
+  from `KnowledgeRecord`), the
+  `Knowledge Topics Listed Event`
+  entry, and re-aligned the
+  JSON/Markdown adapter's on-disk
+  description.
+- `docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md` —
+  Phase 4 status flipped from
+  `PENDING` to `DONE` with the full
+  inventory in both the summary
+  section (line ~265) and the
+  detailed Phase 4 plan (line ~1510).
+  Deferred items (the
+  `search_throughput` benchmark and
+  the `operator_backup.sh` shell
+  script) are explicitly marked
+  "Deferred to a future pack" with
+  the rationale.
 
 ## Validation results
 
@@ -137,153 +147,132 @@ All 4 gates green on the
 | Gate | Result |
 | --- | --- |
 | `cargo fmt --all -- --check` | PASS |
-| `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| `cargo test --workspace` | **342 passing**, 0 failed |
-| `cargo doc --workspace --no-deps` | PASS |
+| `cargo clippy --workspace --all-targets --all-features -- -D warnings` | PASS |
+| `cargo test --workspace` | **348 passing**, 0 failed |
+| `cargo doc --workspace --all-features --no-deps` | PASS |
 
-**Test count delta:** 324 → 342 (+18). The
+**Test count delta:** 342 → 348 (+6). The
 breakdown:
 
-- 2 in `tests/adapter_crash_safety.rs`
-  (corrupt `.index.json` rebuild + orphan
-  temp file cleanup at boot).
-- 1 in `tests/adapter_concurrency.rs`
-  (100 parallel `store_information` calls
-  — all 100 records present in the index
-  after, no lost writes, no duplicate
-  `RecordId`s).
-- 9 in `tests/proptest_round_trips.rs`
-  (9 `proptest!` properties, 256 cases
-  each).
-- 4 in `tests/adapter_events.rs`
-  (no `free_text` in queried event, no
-  `content` in stored event, queried event
-  fires on empty result, stored event fires
-  only after index write is durable).
-- 2 in `src/index_file.rs` (in-module unit
-  tests for the `TopicFile` /
-  `RecordFile` serde round-trip).
+- 5 in
+  `crates/afa-kernel/tests/knowledge_integration.rs`
+  (`store → find`, `empty list`,
+  `store → find → list` w/ 3 events,
+  `capabilities reporting`,
+  `no-adapter returns error`).
+- 1 in
+  `crates/afa-knowledge/tests/knowledge_v1.rs`
+  (`run_conformance_suite` against
+  the real `JsonKnowledgeAdapter`).
 
-## Key design decisions made in Phase 3
+## Key design decisions made in Phase 4
 
-1. **Best-effort rebuild on corrupt
-   `.index.json`.** The adapter logs
-   `tracing::warn!` and calls
-   `rebuild_from_disk()` rather than
-   quarantining the corrupt file. The
-   on-disk `.md` files are the source of
-   truth; the index is just a cache.
-   The v1 limitation: topic names can't
-   be perfectly recovered from the slug
-   alone (slugs are not uniquely
-   invertible), so the rebuild may
-   produce a different `topic` string
-   than the original. A future pack will
-   add a `<record_id>.json` metadata
-   sidecar for lossless recovery.
-2. **Orphan temp file cleanup at boot.**
-   The cleanup walker removes any file
-   matching `*.md.tmp.<random_suffix>` in
-   any subdirectory of the storage root.
-   `tokio::fs::remove_file` failures are
-   logged with `tracing::warn!` but
-   don't abort the boot (best-effort).
-3. **Content tokens cache eviction.**
-   The `content_tokens: HashMap<RecordId,
-   BTreeSet<String>>` cache is now evicted
-   on every `store_information` call
-   (the `record_id` key is removed). This
-   makes the cache correct in the rare
-   case where a record is overwritten
-   with a new content. The next
-   `find_information` for that record
-   re-loads + re-tokenizes on demand.
-4. **`MalformedRecord` for read failures.**
-   `tokio::fs::read_to_string` failures
-   on a record file are now mapped to
-   `KnowledgeErrorV1::MalformedRecord`
-   (not `StorageUnavailable`). The
-   rationale: a file that exists but
-   cannot be read is a record-shape
-   problem, not a storage-availability
-   problem. This matches the IMPL TRD
-   §2.3.5 error classification.
-5. **Atomic write for `.index.json`.**
-   The `index_file::save()` helper uses
-   the same temp + rename + parent fsync
-   pattern as the record write path. The
-   on-disk `.index.json` is always either
-   the old version or the new version
-   (never a half-written file). A crash
-   between the record write and the
-   index write loses the new record's
-   metadata (the `.md` file is on disk
-   but the index doesn't know about it);
-   this is the documented v1 limitation.
-
-## Phase 4 (Integration + final CI + docs) inventory (the next step)
-
-The next checkpoint is the IMPL Phase 4
-task list. Items the next session should
-land:
-
-1. **Integration tests in
-   `afa-kernel`.** A real `Kernel` boots
-   with a real `JsonKnowledgeAdapter`
-   against a `tempfile::TempDir`, runs
-   end-to-end `find_information` +
-   `store_information` calls, and asserts
-   the 2 events on the bus.
-2. **Conformance suite vs. the
-   real `JsonKnowledgeAdapter`** (in
-   addition to the `MockAdapter`).
-3. **Doc verification** — `docs/engines/
-   Knowledge.md` + `docs/CONTEXT.md`
-   (10 Knowledge glossary entries) +
-   `docs/plugins/KnowledgeJson.md`
-   (the new plugin doc, mirroring
-   `LlmHttp.md`).
-4. **IMPL Phase 4 status flip** from
-   `PENDING` to `DONE`.
-5. **Manual commit + push** (the user
-   runs `git commit -m "..."` per the
-   project's tooling protocol).
+1. **Reuse the LLM accessor pattern.**
+   `Kernel::register_knowledge()` and
+   `Kernel::knowledge(key)` are
+   structurally identical to the LLM
+   version. The only delta: the
+   underlying `CapabilityRegistry` method
+   is also `register_knowledge` (per the
+   Phase 0 spec; the `Kernel` is a thin
+   facade that delegates).
+2. **No new error variants.** Phase 4
+   uses the existing `KernelError` enum
+   (`NoKnowledgeAdapter` if the
+   capability was never registered,
+   `UnknownKnowledgeKey` if the key is
+   unknown). Both are symmetric to the
+   LLM-side errors.
+3. **Real-impl conformance test, not a
+   phase-4-only test file.** The IMPL
+   allowed "or extend the existing
+   `knowledge_v1.rs`" — we extended.
+   The new test is
+   `knowledge_v1_conformance_suite_against_json_adapter`,
+   co-located with the existing
+   `MockAdapter` test. Future sibling
+   adapters (Postgres, Neo4j) follow
+   the same pattern: extend
+   `knowledge_v1.rs` with a
+   `*_against_<backend>` test that runs
+   the same `run_conformance_suite`.
+4. **Re-`cargo fmt` was not needed.**
+   The new code was formatted correctly
+   on first write (the new tests in
+   `knowledge_integration.rs` and
+   `knowledge_v1.rs` were inspected
+   line-by-line for line length and
+   brace style). `cargo fmt --all
+   -- --check` is the
+   `Makefile`-driven gate, and it passed
+   first try.
+5. **`cargo doc` was not regressed.**
+   The new `docs/plugins/KnowledgeJson.md`
+   is plain Markdown (not a doc comment
+   in the crate), so it doesn't affect
+   `cargo doc`. The crate doc-comments
+   were not touched in this phase.
 
 ## Open questions for the next session
 
-1. **Metadata sidecar for lossless
-   recovery.** A future pack adds
-   `<record_id>.json` next to each
-   `<record_id>.md` file. The sidecar
-   carries the topic name, tags, source,
-   created_at, size_bytes. With the
-   sidecar, `rebuild_from_disk` can
-   losslessly recover the in-memory
-   index. Phase 4 doesn't need this
-   (the v1 limitation is acceptable),
-   but the next pack that touches
-   `afa-plugin-knowledge-json` should
-   plan for it.
-2. **Concurrent read on the
-   `content_tokens` cache.** The cache
-   eviction is now done inside
-   `store_information` (which holds the
-   write lock), so there's no
-   reader/writer race. The pattern is
-   correct, but the docstring in
-   `index.rs` should call this out
-   explicitly (Phase 4 doc pass).
+1. **Knowledge engines in the HTTP layer.**
+   When the v1.5 HTTP layer lands (the
+   next major work in
+   `docs/roadmap/v1.5.md`), the
+   `GET /knowledge/topics` + `POST
+   /knowledge/store` handlers are the
+   first consumers of
+   `Kernel::knowledge(key)`. The pattern
+   is identical to the LLM handlers
+   that already exist. No design work
+   needed — just a "wire it up" task.
+2. **Knowledge engines in `afa-cli`.**
+   The v1.5 `afa-cli` gains
+   `afa knowledge list-topics` and
+   `afa knowledge search` subcommands.
+   Same pattern as the LLM subcommands.
+   The `Kernel::knowledge(key)` accessor
+   is the entry point. No design work
+   needed.
+3. **Metadata sidecar for lossless
+   recovery.** Phase 3's documented v1
+   limitation (the topic name can't be
+   perfectly recovered from the slug
+   alone) is still open. A future pack
+   adds `<record_id>.json` next to each
+   `<record_id>.md`. The IMPL has this
+   in the "Deferred Items" section of
+   the TRD.
+4. **`search_throughput` benchmark.**
+   Deferred from Phase 4. v1 ships
+   correctness, not throughput numbers.
+   The benchmark is a future pack's
+   problem (probably the same pack that
+   adds the v1.5 search relevance
+   improvements).
 
 ## Files in scope (quick index)
 
+- Kernel source:
+  [crates/afa-kernel/src/kernel.rs](file:///home/spanexx/Shared/agents/afa/crates/afa-kernel/src/kernel.rs),
+  [crates/afa-kernel/src/lib.rs](file:///home/spanexx/Shared/agents/afa/crates/afa-kernel/src/lib.rs)
+- Kernel tests:
+  [crates/afa-kernel/tests/knowledge_integration.rs](file:///home/spanexx/Shared/agents/afa/crates/afa-kernel/tests/knowledge_integration.rs)
+- Knowledge source:
+  [crates/afa-knowledge/src/lib.rs](file:///home/spanexx/Shared/agents/afa/crates/afa-knowledge/src/lib.rs),
+  [crates/afa-knowledge/src/conformance.rs](file:///home/spanexx/Shared/agents/afa/crates/afa-knowledge/src/conformance.rs)
+- Knowledge tests:
+  [crates/afa-knowledge/tests/knowledge_v1.rs](file:///home/spanexx/Shared/agents/afa/crates/afa-knowledge/tests/knowledge_v1.rs)
 - Plugin source:
   [crates/afa-plugin-knowledge-json/src/](file:///home/spanexx/Shared/agents/afa/crates/afa-plugin-knowledge-json/src/)
-- Plugin tests:
-  [crates/afa-plugin-knowledge-json/tests/](file:///home/spanexx/Shared/agents/afa/crates/afa-plugin-knowledge-json/tests/)
-- Conformance suite:
-  [crates/afa-knowledge/src/conformance.rs](file:///home/spanexx/Shared/agents/afa/crates/afa-knowledge/src/conformance.rs)
 - IMPL:
   [docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md](file:///home/spanexx/Shared/agents/docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md)
+- Engine doc:
+  [docs/engines/Knowledge.md](file:///home/spanexx/Shared/agents/docs/engines/Knowledge.md)
+- Plugin doc (new):
+  [docs/plugins/KnowledgeJson.md](file:///home/spanexx/Shared/agents/docs/plugins/KnowledgeJson.md)
+- Glossary:
+  [docs/CONTEXT.md](file:///home/spanexx/Shared/agents/docs/CONTEXT.md)
 - PRD/TRD/FLOW: same
   `docs/features/knowledge-engine-json-store/`
   folder
@@ -300,7 +289,7 @@ land:
   test asserts on observable behavior
   (file system state, on-disk `.md`
   files, on-disk `.index.json`, bus
-  events, lock-discipline behavior).
+  events, `KernelError` shapes).
 - Validation gate is the single-command
   `make` entry point.
 - v1 limitations documented inline
@@ -311,58 +300,81 @@ land:
 ## Suggested commit message (you run manually)
 
 ```
-feat(knowledge-engine-json-store): pack #5 phase 3 (resilience) complete
+feat(knowledge-engine-json-store): pack #5 phase 4 (integration + docs) complete
 
-* index_file.rs: IndexFileV1 on-disk format with LoadOutcome
-  (Loaded/Missing/Corrupt) + atomic save() + rebuild_from_disk() +
-  cleanup_orphan_temp_files().
-* adapter.rs: store_information writes .index.json atomically; new()
-  dispatches on LoadOutcome (Missing -> empty index, Corrupt -> rebuild
-  from disk with tracing::warn); read_to_string failures on record
-  files now map to MalformedRecord; content_tokens cache evicted on
-  every store_information.
-* index.rs: InMemoryIndex gained Debug derive; add_record() signature
-  expanded with the fields needed by the on-disk RecordFile.
-* Tests: 2 in adapter_crash_safety.rs (corrupt .index.json rebuild +
-  orphan temp file cleanup at boot); 1 in adapter_concurrency.rs
-  (100 parallel store_information calls, all 100 present in the
-  index, no lost writes, no duplicate RecordIds); 9 in
-  proptest_round_trips.rs (256 cases per property for all 9 Knowledge
-  types); 4 in adapter_events.rs (no free_text in queried event, no
-  content in stored event, queried event fires on empty result,
-  stored event fires only after index write is durable).
-* IMPL: Phase 3 status PENDING -> DONE with full inventory.
-* Validation: 342 tests, 0 failed. All 4 gates green.
+* afa-kernel: register_knowledge() + knowledge() accessors on Kernel,
+  mirroring the LLM accessor pattern. New error variants: None —
+  reuses KernelError::NoKnowledgeAdapter (unregistered) and
+  UnknownKnowledgeKey (unknown key). Re-exports KnowledgeV1 from
+  afa-contracts so downstream code can use afa_kernel::{Kernel,
+  KnowledgeV1} without touching afa-contracts.
 
-v1 limitation documented inline: rebuild_from_disk() is best-effort;
-the topic name may not be perfectly recovered from the slug alone.
-A future pack adds a <record_id>.json metadata sidecar for lossless
-recovery.
+* afa-kernel/tests/knowledge_integration.rs (NEW): 5 end-to-end
+  tests that wire a real Kernel + real CapabilityRegistry + real
+  JsonKnowledgeAdapter over a real EventBus. Covers store → find,
+  empty list, store → find → list w/ 3 events (KnowledgeQueried,
+  KnowledgeRecordStored, KnowledgeTopicsListed), describe_capabilities,
+  and the no-adapter-registered error path.
+
+* afa-knowledge/tests/knowledge_v1.rs: extended with 1 real-impl
+  conformance test (knowledge_v1_conformance_suite_against_json_adapter)
+  that runs the same run_conformance_suite against the real
+  JsonKnowledgeAdapter (in addition to the in-crate MockAdapter)
+  and asserts the on-disk side effect (<record_id>.md is on disk
+  after the canned store_information, .index.json is parseable).
+
+* afa-kernel/Cargo.toml: afa-plugin-knowledge-json added as
+  dev-dependency. afa-knowledge/Cargo.toml: afa-plugin-knowledge-json,
+  afa-bus, uuid added as dev-dependencies.
+
+* docs/engines/Knowledge.md: re-aligned the on-disk layout
+  section (per-record .md files in per-topic folders, not
+  per-topic .md files), the LoadOutcome dispatch, the orphan-temp
+  cleanup at boot, the KnowledgeRecordInput vs. KnowledgeRecord
+  split (writer's view vs. reader's view per TRD §2.2.2), and
+  the KnowledgeTopicsListed event.
+
+* docs/CONTEXT.md: added KnowledgeRecordInput, the Knowledge Topics
+  Listed Event, and re-aligned the JSON/Markdown adapter's
+  on-disk description.
+
+* docs/plugins/KnowledgeJson.md (NEW): mirrors docs/plugins/LlmHttp.md
+  (Purpose / Responsibilities / Capability Reporting / What Changes
+  Here vs. Elsewhere / Configuration / Boot Resilience).
+
+* IMPL: Phase 4 status PENDING -> DONE in both the summary section
+  and the detailed Phase 4 plan. Deferred items (search_throughput
+  benchmark + operator_backup.sh) explicitly marked with rationale.
+
+* Validation: 348 tests, 0 failed (was 342, +6: 5 kernel
+  integration + 1 real-impl conformance). All 4 gates green.
+  make clean. cargo doc clean.
 ```
 
 ## Working tree (uncommitted, your turn)
 
 ```
- M crates/afa-plugin-knowledge-json/src/adapter.rs
- M crates/afa-plugin-knowledge-json/src/index.rs
- M crates/afa-plugin-knowledge-json/src/lib.rs
-?? crates/afa-plugin-knowledge-json/src/index_file.rs
-?? crates/afa-plugin-knowledge-json/tests/adapter_concurrency.rs
-?? crates/afa-plugin-knowledge-json/tests/adapter_crash_safety.rs
-?? crates/afa-plugin-knowledge-json/tests/adapter_events.rs
-?? crates/afa-plugin-knowledge-json/tests/proptest_round_trips.proptest-regressions
-?? crates/afa-plugin-knowledge-json/tests/proptest_round_trips.rs
+M crates/afa-kernel/Cargo.toml
+M crates/afa-kernel/src/kernel.rs
+M crates/afa-kernel/src/lib.rs
+M crates/afa-knowledge/Cargo.toml
+M crates/afa-knowledge/tests/knowledge_v1.rs
+M docs/CONTEXT.md
+M docs/engines/Knowledge.md
+M docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md
+?? crates/afa-kernel/tests/knowledge_integration.rs
+?? docs/plugins/KnowledgeJson.md
 ```
 
-The `.proptest-regressions` file is a proptest
-artifact (regression cases for the round-trip
-properties); keep it in the commit (proptest
-documents this).
+**Total: 8 modified, 2 new files, all 4
+gates green.** No regressions in the
+security pack's, LLM pack's, or
+Knowledge pack's conformance suites.
 
-Doc change (outside git by design, per
-existing pattern):
-`docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md`
-— Phase 3 status flipped from `PENDING` to
-`DONE` with the full inventory.
-
-Next: Phase 4 (Integration + final CI + docs).
+Pack #5 (`knowledge-engine-json-store`)
+is **code-complete**. The next pack in
+the v1.0 roadmap is
+`learning-engine-staged` (pack #13) or
+`domain-real-estate` (pack #20) — both
+are first consumers of the
+`Arc<dyn KnowledgeV1>` accessor.

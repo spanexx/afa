@@ -71,6 +71,19 @@ wiremock = "0.6"
 # test is the only place in the kernel crate that
 # materialises a concrete adapter.
 afa-plugin-llm-http = { path = "../afa-plugin-llm-http" }
+# Concrete Knowledge adapter for the Phase 4
+# end-to-end integration test
+# (`tests/knowledge_integration.rs`). Same
+# layering rationale as
+# `afa-plugin-llm-http` above: the kernel ships
+# only the trait-object view
+# (`CapabilityRegistry::register_knowledge`); the
+# concrete `JsonKnowledgeAdapter` lives in its own
+# plugin crate and is wired in by the integration
+# test. The integration test is the only place in
+# the kernel crate that materialises a concrete
+# Knowledge adapter.
+afa-plugin-knowledge-json = { path = "../afa-plugin-knowledge-json" }
 # Re-exported from `afa-contracts` (where it is a direct
 # dep). Used by `src/runtime.rs` to round-trip the
 # `CorrelationId` through the `uuid::Uuid` parser in the

@@ -34,7 +34,7 @@ use crate::capability_registry::{CapabilityRegistry, RegisterError};
 use crate::event_bus::{EventBus, EventBusHandle};
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
-use afa_contracts::{LlmV1, SecurityErrorV1, SecurityV1};
+use afa_contracts::{KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1};
 use afa_security::{MasterKey, SealedSecretStore, SecurityEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -228,6 +228,76 @@ impl Kernel {
     /// "LLM not configured" error.
     pub fn llm(&self) -> Option<Arc<dyn LlmV1>> {
         self.capabilities.lock().expect("capabilities mutex").llm()
+    }
+
+    /// Register a Knowledge storage adapter with
+    /// the kernel's `CapabilityRegistry` under a
+    /// `key` (typically `"default"` for a
+    /// single-tenant deployment, or one entry
+    /// per tenant id in a multi-tenant
+    /// deployment). This is the composition-root
+    /// entry point for the Knowledge capability:
+    /// a bootstrap handler (an `axum` route, a
+    /// CLI command, or an integration test)
+    /// builds a concrete adapter (e.g.
+    /// `JsonKnowledgeAdapter` pointed at a
+    /// tempdir-backed storage root), wraps it in
+    /// an `Arc<dyn KnowledgeV1>`, and hands it
+    /// to this method along with the same
+    /// `storage_root` the adapter was built
+    /// with. The `storage_root` is retained for
+    /// diagnostics only (the `knowledge(key)`
+    /// accessor does not hand back the path; a
+    /// future health-check surface will).
+    /// A second `register_knowledge` under the
+    /// same `key` is a programmer error and
+    /// returns
+    /// `RegisterError::KnowledgeAlreadyRegistered
+    /// { key }`. The kernel's `CapabilityRegistry`
+    /// holds one slot per `key`, not a single
+    /// global slot (a multi-tenant deployment
+    /// should use one `key` per tenant id, not
+    /// re-register the `"default"` key).
+    /// Phase 4 integration tests use this to
+    /// wire a real `JsonKnowledgeAdapter` into
+    /// a fresh `Kernel` and exercise the full
+    /// `Kernel → CapabilityRegistry → KnowledgeV1
+    /// → on-disk → audit bus` round-trip.
+    pub fn register_knowledge(
+        &self,
+        key: impl Into<String>,
+        adapter: Arc<dyn KnowledgeV1>,
+        storage_root: PathBuf,
+    ) -> Result<(), RegisterError> {
+        self.capabilities
+            .lock()
+            .expect("capabilities mutex")
+            .register_knowledge(key, adapter, storage_root)
+    }
+
+    /// Hand out a clone of the `Arc<dyn
+    /// KnowledgeV1>` stored under the given
+    /// `key`, or `None` if no adapter has been
+    /// registered under that key. Mirrors
+    /// `llm()` in shape (a fresh `Arc` per
+    /// call, the underlying instance is
+    /// shared). Used by every workflow that
+    /// needs a Knowledge storage adapter —
+    /// `kernel.knowledge("default").expect("no
+    /// Knowledge configured")` is the canonical
+    /// pattern. A workflow that runs before
+    /// the bootstrap registers an adapter sees
+    /// `None` and surfaces a clear "no
+    /// Knowledge configured for this tenant"
+    /// error. The `storage_root` the adapter
+    /// was registered with is NOT handed back
+    /// (the workflow does not need it; only a
+    /// future health-check surface will).
+    pub fn knowledge(&self, key: &str) -> Option<Arc<dyn KnowledgeV1>> {
+        self.capabilities
+            .lock()
+            .expect("capabilities mutex")
+            .knowledge(key)
     }
 }
 

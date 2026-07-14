@@ -78,6 +78,7 @@ version = "0.1.0"
 dependencies = [
  "afa-bus",
  "afa-contracts",
+ "afa-plugin-knowledge-json",
  "afa-plugin-llm-http",
  "afa-security",
  "async-trait",
@@ -96,9 +97,13 @@ dependencies = [
 name = "afa-knowledge"
 version = "0.1.0"
 dependencies = [
+ "afa-bus",
  "afa-contracts",
+ "afa-plugin-knowledge-json",
  "async-trait",
+ "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
