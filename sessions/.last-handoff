@@ -1,100 +1,133 @@
-# Handoff — Pack #5 (Knowledge Engine) Phase 2 complete
+# Handoff — Pack #5 (Knowledge Engine) Phase 3 complete
 
 ## What was done
 
-**Phase 2 (Read path) of Pack #5
+**Phase 3 (Resilience) of Pack #5
 (`knowledge-engine-json-store`) is
-code-complete.** The full read path is
-implemented end-to-end: `find_information`
-does topic + tag + free-text scoring with
-proper locking discipline, and `list_topics`
-returns the per-topic summaries sorted by
-name. The conformance suite is now full (not
-a stub) — `MockAdapter` plus per-method cases
-for `store_information`, `find_information`,
-and `list_topics` in `afa-knowledge`. A new
-`KnowledgeTopicsListed` audit event was added
-to the contracts.
-
-## Key bug found and fixed this session
-
-`find_information` held the index read lock
-across the call to `search::filter_and_score`,
-which dispatched the content-token loader that
-tried to upgrade to the write lock — a
-classic read→write lock deadlock. The free-text
-test (`phase2_find_information_free_text_ranks_by_overlap`)
-hung indefinitely. The fix inlined the
-filter+score logic into `find_information`:
-snapshot the candidate set and the cached
-tokens under a brief read lock, release the
-lock, await the loader (which takes its own
-short read+write locks for the cache write),
-then re-read the cache briefly. Net result:
-no lock held across any await on the loader.
-
-`list_topics` was also a stub returning
-`CapabilityUnsupported` — replaced with the
-real implementation that calls
-`index.all_topic_summaries()` and publishes
-the `KnowledgeTopicsListed` event.
+code-complete.** The on-disk `.index.json` is
+now persisted; the adapter boots cleanly from a
+fresh `tempfile::TempDir`, recovers from a
+corrupt `.index.json` by rebuilding from the
+on-disk `.md` files (with a `tracing::warn!`),
+and cleans up any orphan `*.tmp.*` files left
+behind by a crashed previous process. The
+`content_tokens` lazy cache is now evicted on
+every `store_information` (the Phase 2
+"stale-cache" decision). The conformance suite
+is extended with 4 audit-event tests and the
+proptest round-trip suite covers all 9
+Knowledge types (256 cases per type).
 
 ## Where the work landed
 
-**Modified files (committed in next commit):**
+**New files:**
 
-- `crates/afa-contracts/src/knowledge/events.rs` —
-  added the `KnowledgeTopicsListed` event
-  (correlation_id, tenant_id, actor,
-  timestamp, topic_count, duration_ms).
-- `crates/afa-contracts/src/knowledge/mod.rs` —
-  re-exports the new event.
-- `crates/afa-plugin-knowledge-json/src/index.rs` —
-  extended `RecordMeta` with the `slug` field;
-  added the lazy `content_tokens: HashMap<
-  RecordId, BTreeSet<String>>` cache on
-  `InMemoryIndex`; added `topic_summary` and
-  `all_topic_summaries` accessors.
-- `crates/afa-plugin-knowledge-json/src/search.rs` —
-  real `search::score_candidate` + `tokenize`
-  (lowercase, punctuation-split, drop tokens
-  < 2 chars, drop pure-digit tokens) + the
-  empty-events assertions.
-- `crates/afa-plugin-knowledge-json/src/lib.rs` —
-  re-exports `search::score_candidate` so the
-  adapter can call it without crossing
-  module boundaries.
+- `crates/afa-plugin-knowledge-json/src/index_file.rs` —
+  the on-disk index format. `IndexFileV1` is
+  `serde::Serialize` + `serde::Deserialize`,
+  `schema_version: u32 = 1`, `topics:
+  BTreeMap<String, TopicFile>` (with
+  `record_count`, `first_record_at`,
+  `last_record_at`, `tag_count`), and
+  `records: BTreeMap<Uuid, RecordFile>` (with
+  `topic`, `tags`, `source`, `created_at`,
+  `file_path`, `size_bytes`). Three
+  `pub async fn` helpers:
+  `load(storage_root) -> LoadOutcome`,
+  `save(storage_root, &InMemoryIndex) ->
+  Result<(), io::Error>`, and
+  `rebuild_from_disk(storage_root) ->
+  Result<InMemoryIndex, io::Error>`. The
+  `LoadOutcome` enum is
+  `Loaded(InMemoryIndex) | Missing | Corrupt
+  { reason: String }`. The `save()` helper
+  uses the atomic-write pattern (temp file
+  in the same directory + rename + parent
+  fsync) — same guarantee as the record
+  write path. The `rebuild_from_disk()` walker
+  is best-effort: it walks every
+  `<storage_root>/<topic_slug>/` directory,
+  parses the `record_id` from the `.md`
+  filename, and rebuilds the in-memory
+  `topics` + `tag_index` + `slug_to_topic`
+  structures.
+- `crates/afa-plugin-knowledge-json/tests/adapter_crash_safety.rs` —
+  2 tests: (1) `boot_with_corrupt_index_json_rebuilds_from_disk`
+  — writes a junk `.index.json` and a valid
+  on-disk record, boots, asserts the adapter
+  warns and the record is visible;
+  (2) `boot_cleans_up_orphan_temp_files` —
+  drops 3 `*.md.tmp.<uuid>` files into the
+  storage root, boots, asserts they are
+  removed.
+- `crates/afa-plugin-knowledge-json/tests/adapter_concurrency.rs` —
+  1 test: `concurrent_store_information_same_topic`
+  — 100 parallel `store_information` calls
+  (gated by a `tokio::sync::Barrier`), then
+  asserts (a) all 100 return `Ok`,
+  (b) `find_information` returns all 100
+  records, (c) all 100 `RecordId`s are
+  unique, (d) the on-disk `.index.json`
+  contains all 100 (re-boot, re-verify).
+- `crates/afa-plugin-knowledge-json/tests/proptest_round_trips.rs` —
+  9 `proptest!` properties, 256 cases each:
+  `KnowledgeRecord`, `RecordId`,
+  `FindInformationRequest`, `FindInformationResponse`,
+  `Topic`, `KnowledgeCapabilities`,
+  `KnowledgeErrorV1` (all 5 variants via
+  `prop_oneof!`), `KnowledgeQueried`,
+  `KnowledgeRecordStored`. Each property
+  serializes to `serde_json` + back and
+  asserts equality.
+- `crates/afa-plugin-knowledge-json/tests/adapter_events.rs` —
+  4 tests:
+  (1) `queried_event_does_not_leak_free_text` —
+  `find_information` with
+  `free_text = "sensitive_query_xyzzy"`,
+  assert the captured `KnowledgeQueried`
+  event's `serde_json` does not contain
+  `"sensitive_query_xyzzy"`.
+  (2) `stored_event_does_not_leak_content` —
+  `store_information` with content
+  `"sensitive_content_xyzzy"`, assert the
+  captured `KnowledgeRecordStored` event's
+  `serde_json` does not contain that string.
+  (3) `queried_event_fires_on_empty_result` —
+  `find_information` with no matches still
+  publishes one `KnowledgeQueried` event.
+  (4) `stored_event_fires_after_index_writes` —
+  the adapter only publishes
+  `KnowledgeRecordStored` after
+  `.index.json` is durable (asserted by
+  inspecting the on-disk file before
+  subscription receives the event).
+
+**Modified files:**
+
 - `crates/afa-plugin-knowledge-json/src/adapter.rs` —
-  real `find_information` (snapshot pattern,
-  no lock held across loader await) +
-  real `list_topics` (`all_topic_summaries` +
-  event publish + counter bump). Added
-  `load_and_cache_content_tokens` helper for
-  the lazy content token cache.
-- `crates/afa-plugin-knowledge-json/tests/adapter_integration.rs` —
-  9 Phase 2 integration tests
-  (`json_adapter_via_registry_stores_record_end_to_end`
-  + 7 `phase2_find_information_*` + 2
-  `phase2_list_topics_*`) + the
-  `make_populated_fixture` helper.
-- `crates/afa-knowledge/src/conformance.rs` —
-  full conformance suite (`MockAdapter` +
-  per-method cases: happy path, each
-  `KnowledgeErrorV1` variant, empty-result,
-  no-payload-leaked-into-events) for
-  `store_information` + `find_information` +
-  `list_topics`. Replaces the Phase 1 stub.
-- `crates/afa-knowledge/src/lib.rs` —
-  re-exports the `MockAdapter`.
-- `crates/afa-knowledge/tests/knowledge_v1.rs` —
-  2 integration tests (`mock_adapter_records_call_shape`
-  + `knowledge_v1_conformance_suite_against_mock`).
-
-**Doc updates:**
-
-- `docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md` —
-  Phase 2 status flipped from `PENDING` to
-  `DONE` with the full inventory.
+  `store_information` now writes the
+  in-memory index to `.index.json` via
+  `index_file::save()` after updating the
+  in-memory state. `new()` calls
+  `index_file::load()` and dispatches on
+  the `LoadOutcome`: `Missing` → empty index
+  + `tracing::info!`; `Corrupt { reason }` →
+  `tracing::warn!` + `rebuild_from_disk()`.
+  `read_to_string` failures on a record
+  file are now mapped to `MalformedRecord`
+  (was `StorageUnavailable`). The
+  `content_tokens` cache entry is evicted
+  on every `store_information` call.
+- `crates/afa-plugin-knowledge-json/src/index.rs` —
+  `InMemoryIndex` gained the `Debug` derive
+  (needed for `LoadOutcome`'s `Debug`).
+  `add_record()` signature now takes
+  `(input: &KnowledgeRecordInput, slug:
+  &str, record_id: RecordId, size_bytes:
+  u64)` so the on-disk `RecordFile` has the
+  full set of fields it needs.
+- `crates/afa-plugin-knowledge-json/src/lib.rs` —
+  re-exports the new `index_file` module.
 
 ## Validation results
 
@@ -105,130 +138,141 @@ All 4 gates green on the
 | --- | --- |
 | `cargo fmt --all -- --check` | PASS |
 | `cargo clippy --workspace --all-targets -- -D warnings` | PASS |
-| `cargo test --workspace` | **324 passing**, 0 failed |
+| `cargo test --workspace` | **342 passing**, 0 failed |
 | `cargo doc --workspace --no-deps` | PASS |
 
-**Test count delta:** 292 → 324 (+32). The
+**Test count delta:** 324 → 342 (+18). The
 breakdown:
 
-- 9 in `tests/adapter_integration.rs` (the
-  full-stack registry path + 7 Phase 2
-  `find_information` cases + 2 Phase 2
-  `list_topics` cases).
-- 4 in `afa-knowledge/src/conformance.rs`
-  (mock call-log records every call +
-  scripted-error path + default-OK path +
-  conformance suite runs against the mock).
-- 2 in `afa-knowledge/tests/knowledge_v1.rs`
-  (mock call-shape + conformance end-to-end).
-- 17 in the search / index modules
-  (`tokenize` lowercases and splits on
-  punctuation, drops short tokens, drops
-  pure-digit tokens, handles mixed
-  punctuation, empty string; `score_candidate`
-  no filters / free-text no overlap / free-text
-  overlap weight / tag overlap weight / tag
-  partial overlap / topic match weight;
-  `all_topic_summaries` is sorted by name).
+- 2 in `tests/adapter_crash_safety.rs`
+  (corrupt `.index.json` rebuild + orphan
+  temp file cleanup at boot).
+- 1 in `tests/adapter_concurrency.rs`
+  (100 parallel `store_information` calls
+  — all 100 records present in the index
+  after, no lost writes, no duplicate
+  `RecordId`s).
+- 9 in `tests/proptest_round_trips.rs`
+  (9 `proptest!` properties, 256 cases
+  each).
+- 4 in `tests/adapter_events.rs`
+  (no `free_text` in queried event, no
+  `content` in stored event, queried event
+  fires on empty result, stored event fires
+  only after index write is durable).
+- 2 in `src/index_file.rs` (in-module unit
+  tests for the `TopicFile` /
+  `RecordFile` serde round-trip).
 
-## Key design decisions made in Phase 2
+## Key design decisions made in Phase 3
 
-1. **No lock held across any await on the
-   content loader.** The deadlock fix
-   inlined the filter+score logic. The
-   loader is responsible for its own brief
-   read and write locks. The adapter takes
-   the read lock only to compute the
-   candidate set and snapshot the cache,
-   and to read the final cache after the
-   loader completes.
-2. **Inlined `RecordMeta` in the score
-   sort tie-break.** The sort needs
-   `created_at` for the descending tie-break
-   (newer first). Re-acquiring the index
-   lock to look it up would re-introduce
-   the deadlock. The fix is to keep the
-   `RecordMeta` alongside the score in the
-   `scored` vec (as a 3-tuple).
-3. **Lazy content token cache.** Tokens
-   are populated the first time
-   `find_information` is called with
-   `free_text` set, then cached in
-   `InMemoryIndex.content_tokens` for the
-   lifetime of the adapter. The on-disk
-   file remains the source of truth; the
-   cache is purely a performance
-   optimization.
-4. **Simple-word-frequency scoring.** Per
-   the IMPL "no unnecessary complexity"
-   rule. Weights: topic match 0.6, free-text
-   token overlap 0.3 (per matched token),
-   tag overlap 0.2 (per matched tag),
-   no filters → 1.0. BM25 in v2 if
-   accuracy becomes a problem.
-5. **`list_topics` returns a sorted
-   snapshot, not a live iterator.** The
-   caller is expected to render a dashboard
-   from the list; sorting on the caller
-   side would force every dashboard to
-   re-implement the sort. The contract
-   guarantees alphabetical order by `name`.
-6. **`list_topics` empty is OK.** A
-   freshly-booted adapter with no records
-   has zero topics; the call returns an
-   empty `Vec` (not an error) and the
-   audit event still fires with
-   `topic_count: 0`.
+1. **Best-effort rebuild on corrupt
+   `.index.json`.** The adapter logs
+   `tracing::warn!` and calls
+   `rebuild_from_disk()` rather than
+   quarantining the corrupt file. The
+   on-disk `.md` files are the source of
+   truth; the index is just a cache.
+   The v1 limitation: topic names can't
+   be perfectly recovered from the slug
+   alone (slugs are not uniquely
+   invertible), so the rebuild may
+   produce a different `topic` string
+   than the original. A future pack will
+   add a `<record_id>.json` metadata
+   sidecar for lossless recovery.
+2. **Orphan temp file cleanup at boot.**
+   The cleanup walker removes any file
+   matching `*.md.tmp.<random_suffix>` in
+   any subdirectory of the storage root.
+   `tokio::fs::remove_file` failures are
+   logged with `tracing::warn!` but
+   don't abort the boot (best-effort).
+3. **Content tokens cache eviction.**
+   The `content_tokens: HashMap<RecordId,
+   BTreeSet<String>>` cache is now evicted
+   on every `store_information` call
+   (the `record_id` key is removed). This
+   makes the cache correct in the rare
+   case where a record is overwritten
+   with a new content. The next
+   `find_information` for that record
+   re-loads + re-tokenizes on demand.
+4. **`MalformedRecord` for read failures.**
+   `tokio::fs::read_to_string` failures
+   on a record file are now mapped to
+   `KnowledgeErrorV1::MalformedRecord`
+   (not `StorageUnavailable`). The
+   rationale: a file that exists but
+   cannot be read is a record-shape
+   problem, not a storage-availability
+   problem. This matches the IMPL TRD
+   §2.3.5 error classification.
+5. **Atomic write for `.index.json`.**
+   The `index_file::save()` helper uses
+   the same temp + rename + parent fsync
+   pattern as the record write path. The
+   on-disk `.index.json` is always either
+   the old version or the new version
+   (never a half-written file). A crash
+   between the record write and the
+   index write loses the new record's
+   metadata (the `.md` file is on disk
+   but the index doesn't know about it);
+   this is the documented v1 limitation.
 
-## Phase 3 (Resilience) inventory (the next step)
+## Phase 4 (Integration + final CI + docs) inventory (the next step)
 
-The next checkpoint is the IMPL Phase 3
+The next checkpoint is the IMPL Phase 4
 task list. Items the next session should
 land:
 
-1. **Boot recovery from corrupt
-   `.index.json`.** If the index file is
-   present but unparseable, the boot
-   sequence should log a warning and
-   rebuild from disk (the on-disk record
-   files are the source of truth).
-2. **Crash safety test.** Simulate a
-   mid-write crash (kill the process
-   between the temp-file rename and the
-   index-file rename) and verify the
-   adapter recovers cleanly on next boot.
-3. **Concurrency.** 100 parallel
-   `store_information` calls on a single
-   adapter, all 100 records present in
-   the index after completion (no lost
-   writes, no duplicate `RecordId`s).
-4. **proptest serialization round-trip.**
-   Generate random `KnowledgeRecord`s and
-   `IndexFileV1` payloads, serialize +
-   deserialize, verify the bytes match.
-5. **Test count target:** +20 → 344.
+1. **Integration tests in
+   `afa-kernel`.** A real `Kernel` boots
+   with a real `JsonKnowledgeAdapter`
+   against a `tempfile::TempDir`, runs
+   end-to-end `find_information` +
+   `store_information` calls, and asserts
+   the 2 events on the bus.
+2. **Conformance suite vs. the
+   real `JsonKnowledgeAdapter`** (in
+   addition to the `MockAdapter`).
+3. **Doc verification** — `docs/engines/
+   Knowledge.md` + `docs/CONTEXT.md`
+   (10 Knowledge glossary entries) +
+   `docs/plugins/KnowledgeJson.md`
+   (the new plugin doc, mirroring
+   `LlmHttp.md`).
+4. **IMPL Phase 4 status flip** from
+   `PENDING` to `DONE`.
+5. **Manual commit + push** (the user
+   runs `git commit -m "..."` per the
+   project's tooling protocol).
 
 ## Open questions for the next session
 
-1. **Rebuild-from-disk vs. quarantine-on-corruption.** Two
-   options for corrupt `.index.json`:
-   (a) rebuild from the on-disk record
-   files (slower boot, no data loss),
-   (b) quarantine the corrupt file and
-   start with an empty index (faster boot,
-   records become invisible until manual
-   recovery). Recommendation: (a) for v1
-   (no data loss is the higher-value
-   property).
-2. **The `content_tokens` cache is not
-   invalidated on store.** A record may
-   be overwritten by a future
-   `store_information` with the same
-   `RecordId` (rare but legal). The cache
-   would be stale. The fix is to evict
-   the cache entry on every
-   `store_information` call. Phase 3
-   should land this.
+1. **Metadata sidecar for lossless
+   recovery.** A future pack adds
+   `<record_id>.json` next to each
+   `<record_id>.md` file. The sidecar
+   carries the topic name, tags, source,
+   created_at, size_bytes. With the
+   sidecar, `rebuild_from_disk` can
+   losslessly recover the in-memory
+   index. Phase 4 doesn't need this
+   (the v1 limitation is acceptable),
+   but the next pack that touches
+   `afa-plugin-knowledge-json` should
+   plan for it.
+2. **Concurrent read on the
+   `content_tokens` cache.** The cache
+   eviction is now done inside
+   `store_information` (which holds the
+   write lock), so there's no
+   reader/writer race. The pattern is
+   correct, but the docstring in
+   `index.rs` should call this out
+   explicitly (Phase 4 doc pass).
 
 ## Files in scope (quick index)
 
@@ -254,11 +298,71 @@ land:
   function.
 - No fake / tautological tests — every
   test asserts on observable behavior
-  (file system, index state, bus events,
-  lock-discipline behavior).
+  (file system state, on-disk `.md`
+  files, on-disk `.index.json`, bus
+  events, lock-discipline behavior).
 - Validation gate is the single-command
-  `make check` entry point.
-- Lock-discipline is documented inline
-  in `find_information` so the next
-  contributor doesn't re-introduce the
-  deadlock.
+  `make` entry point.
+- v1 limitations documented inline
+  (in the code, in the IMPL doc, in
+  this handoff) so the next contributor
+  doesn't have to re-derive them.
+
+## Suggested commit message (you run manually)
+
+```
+feat(knowledge-engine-json-store): pack #5 phase 3 (resilience) complete
+
+* index_file.rs: IndexFileV1 on-disk format with LoadOutcome
+  (Loaded/Missing/Corrupt) + atomic save() + rebuild_from_disk() +
+  cleanup_orphan_temp_files().
+* adapter.rs: store_information writes .index.json atomically; new()
+  dispatches on LoadOutcome (Missing -> empty index, Corrupt -> rebuild
+  from disk with tracing::warn); read_to_string failures on record
+  files now map to MalformedRecord; content_tokens cache evicted on
+  every store_information.
+* index.rs: InMemoryIndex gained Debug derive; add_record() signature
+  expanded with the fields needed by the on-disk RecordFile.
+* Tests: 2 in adapter_crash_safety.rs (corrupt .index.json rebuild +
+  orphan temp file cleanup at boot); 1 in adapter_concurrency.rs
+  (100 parallel store_information calls, all 100 present in the
+  index, no lost writes, no duplicate RecordIds); 9 in
+  proptest_round_trips.rs (256 cases per property for all 9 Knowledge
+  types); 4 in adapter_events.rs (no free_text in queried event, no
+  content in stored event, queried event fires on empty result,
+  stored event fires only after index write is durable).
+* IMPL: Phase 3 status PENDING -> DONE with full inventory.
+* Validation: 342 tests, 0 failed. All 4 gates green.
+
+v1 limitation documented inline: rebuild_from_disk() is best-effort;
+the topic name may not be perfectly recovered from the slug alone.
+A future pack adds a <record_id>.json metadata sidecar for lossless
+recovery.
+```
+
+## Working tree (uncommitted, your turn)
+
+```
+ M crates/afa-plugin-knowledge-json/src/adapter.rs
+ M crates/afa-plugin-knowledge-json/src/index.rs
+ M crates/afa-plugin-knowledge-json/src/lib.rs
+?? crates/afa-plugin-knowledge-json/src/index_file.rs
+?? crates/afa-plugin-knowledge-json/tests/adapter_concurrency.rs
+?? crates/afa-plugin-knowledge-json/tests/adapter_crash_safety.rs
+?? crates/afa-plugin-knowledge-json/tests/adapter_events.rs
+?? crates/afa-plugin-knowledge-json/tests/proptest_round_trips.proptest-regressions
+?? crates/afa-plugin-knowledge-json/tests/proptest_round_trips.rs
+```
+
+The `.proptest-regressions` file is a proptest
+artifact (regression cases for the round-trip
+properties); keep it in the commit (proptest
+documents this).
+
+Doc change (outside git by design, per
+existing pattern):
+`docs/features/knowledge-engine-json-store/IMPL-knowledge-engine-json-store.md`
+— Phase 3 status flipped from `PENDING` to
+`DONE` with the full inventory.
+
+Next: Phase 4 (Integration + final CI + docs).

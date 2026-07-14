@@ -28,6 +28,7 @@ pub mod adapter;
 pub mod atomic_write;
 pub mod config;
 pub mod index;
+pub mod index_file;
 pub mod search;
 pub mod storage;
 pub mod topic_slug;

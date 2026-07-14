@@ -69,7 +69,7 @@ use chrono::{DateTime, Utc};
 // path can build the file path
 // `<storage_root>/<slug>/<record_id>.md`
 // without re-slugifying the topic name).
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RecordMeta {
     pub record_id: RecordId,
     pub topic: String,
@@ -103,6 +103,7 @@ pub struct RecordMeta {
 // kept in sync with `records.len()` (a small
 // redundancy that saves a `.len()` on the
 // hot path).
+#[derive(Debug)]
 pub struct TopicEntry {
     pub records: HashMap<RecordId, RecordMeta>,
     pub record_count: u64,
@@ -130,7 +131,7 @@ pub struct TopicEntry {
 // first query that needs a record's
 // content and caches the token set here;
 // subsequent queries reuse the cache).
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct InMemoryIndex {
     pub topics: BTreeMap<String, TopicEntry>,
     pub slug_to_topic: BTreeMap<String, String>,
@@ -187,36 +188,48 @@ impl InMemoryIndex {
         record_id: RecordId,
         size_bytes: u64,
     ) {
+        let meta = RecordMeta {
+            record_id,
+            topic: input.topic.clone(),
+            tags: input.tags.iter().cloned().collect(),
+            size_bytes,
+            created_at: Utc::now(),
+            preview: input.content.chars().take(256).collect(),
+            slug: slug.to_string(),
+        };
+        self.add_meta(meta);
+        self.store_information_calls = self.store_information_calls.saturating_add(1);
+    }
+
+    /// Add an already-built `RecordMeta` to
+    /// the index. Used by the boot path
+    /// (index-file load + disk rebuild)
+    /// where the metadata comes from disk
+    /// rather than from a fresh
+    /// `store_information` call. The
+    /// `store_information_calls` counter is
+    /// NOT bumped (this is a recovery, not a
+    /// fresh write).
+    pub fn add_meta(&mut self, meta: RecordMeta) {
+        let slug = meta.slug.clone();
         let entry = self
             .topics
-            .entry(slug.to_string())
+            .entry(slug.clone())
             .or_insert_with(|| TopicEntry {
                 records: HashMap::new(),
                 record_count: 0,
             });
-        entry.records.insert(
-            record_id,
-            RecordMeta {
-                record_id,
-                topic: input.topic.clone(),
-                tags: input.tags.iter().cloned().collect(),
-                size_bytes,
-                created_at: Utc::now(),
-                preview: input.content.chars().take(256).collect(),
-                slug: slug.to_string(),
-            },
-        );
+        entry.records.insert(meta.record_id, meta.clone());
         entry.record_count = entry.records.len() as u64;
         self.slug_to_topic
-            .entry(slug.to_string())
-            .or_insert_with(|| input.topic.clone());
-        for tag in &input.tags {
+            .entry(slug)
+            .or_insert_with(|| meta.topic.clone());
+        for tag in &meta.tags {
             self.tag_index
                 .entry(tag.clone())
                 .or_default()
-                .insert(record_id);
+                .insert(meta.record_id);
         }
-        self.store_information_calls = self.store_information_calls.saturating_add(1);
     }
 
     /// Returns the number of topics in the

@@ -206,12 +206,101 @@ impl JsonKnowledgeAdapter {
                 ),
             });
         }
-        // Step 2: empty index.
-        let index = Arc::new(RwLock::new(InMemoryIndex::new()));
+
+        // Step 2: load the on-disk
+        // `.index.json`. Three outcomes:
+        // - `Loaded` → repopulate the
+        //   in-memory index from the file's
+        //   records.
+        // - `Missing` → start with an empty
+        //   index (clean slate; the on-disk
+        //   `.md` files are not walked
+        //   because the index says "no
+        //   records ever stored here"). This
+        //   is the first-boot path.
+        // - `Corrupt` → log a warning and
+        //   call `rebuild_from_disk` to
+        //   repopulate the in-memory index
+        //   from the on-disk `.md` files
+        //   (best-effort v1 limitation: the
+        //   tags, created_at, and preview
+        //   are NOT recovered; only the
+        //   record_id, slug, topic-from-slug,
+        //   and size_bytes are).
+        // - `IoError` → the storage root is
+        //   not accessible (e.g. permission
+        //   denied on the index file); the
+        //   adapter cannot boot.
+        let outcome = crate::index_file::load(&config.storage_root).await;
+        let index = match outcome {
+            crate::index_file::LoadOutcome::Loaded(idx) => {
+                tracing::info!(
+                    topics = idx.topics.len(),
+                    records = idx.total_record_count(),
+                    "JsonKnowledgeAdapter::new: loaded .index.json"
+                );
+                idx
+            }
+            crate::index_file::LoadOutcome::Missing => {
+                tracing::info!(
+                    "JsonKnowledgeAdapter::new: no .index.json found; starting with empty index (first boot)"
+                );
+                InMemoryIndex::new()
+            }
+            crate::index_file::LoadOutcome::Corrupt { reason } => {
+                tracing::warn!(
+                    "{reason}; rebuilding index from on-disk .md files (v1 limitation: tags, created_at, and preview are not recovered)"
+                );
+                match crate::index_file::rebuild_from_disk(&config.storage_root).await {
+                    Ok(idx) => idx,
+                    Err(e) => {
+                        return Err(KnowledgeErrorV1::StorageUnavailable {
+                            topic: None,
+                            record_id: None,
+                            reason: format!(
+                                "JsonKnowledgeAdapter::new: rebuild_from_disk failed: {e}"
+                            ),
+                        });
+                    }
+                }
+            }
+            crate::index_file::LoadOutcome::IoError { reason } => {
+                return Err(KnowledgeErrorV1::StorageUnavailable {
+                    topic: None,
+                    record_id: None,
+                    reason: format!("JsonKnowledgeAdapter::new: {reason}"),
+                });
+            }
+        };
+
+        // Step 3: orphan temp file cleanup.
+        // Walk the storage root and remove
+        // any `*.tmp.*` files left over
+        // from a crashed `atomic_write`.
+        // The number of removed files is
+        // logged (operator visibility — a
+        // crash that leaves orphans is
+        // visible in the boot log).
+        let removed = match crate::index_file::cleanup_orphan_temps(&config.storage_root).await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(
+                    "JsonKnowledgeAdapter::new: cleanup_orphan_temps failed: {e}; continuing with boot"
+                );
+                0
+            }
+        };
+        if removed > 0 {
+            tracing::warn!(
+                removed,
+                "JsonKnowledgeAdapter::new: removed orphan temp files from prior crashed writes"
+            );
+        }
+
         Ok(Self {
             config,
             event_bus,
-            index,
+            index: Arc::new(RwLock::new(index)),
         })
     }
 }
@@ -420,7 +509,26 @@ impl KnowledgeV1 for JsonKnowledgeAdapter {
             let content = match tokio::fs::read_to_string(&file_path).await {
                 Ok(s) => s,
                 Err(e) => {
-                    return Err(KnowledgeErrorV1::StorageUnavailable {
+                    // Per IMPL Phase 3:
+                    // a record that is in
+                    // the index but whose
+                    // on-disk `.md` file
+                    // cannot be read is a
+                    // `MalformedRecord`
+                    // (the on-disk layout
+                    // is out of sync with
+                    // the index; the
+                    // recovery path is the
+                    // operator restoring
+                    // the file from
+                    // backup or running
+                    // the rebuild path).
+                    // `StorageUnavailable`
+                    // is reserved for
+                    // "the whole storage
+                    // root is not
+                    // accessible".
+                    return Err(KnowledgeErrorV1::MalformedRecord {
                         topic: Some(meta.topic.clone()),
                         record_id: Some(rid.0),
                         reason: format!(
@@ -553,9 +661,58 @@ impl KnowledgeV1 for JsonKnowledgeAdapter {
 
         // Step 6: update the in-memory
         // index under the write lock.
+        // The lock is held across the
+        // `add_record` call AND the
+        // `index_file::save` call so the
+        // on-disk `.index.json` is a
+        // faithful snapshot of the
+        // in-memory state at the moment
+        // of the write. (The caller may
+        // have issued concurrent stores;
+        // the lock serializes the
+        // snapshot.)
+        //
+        // Also evict any stale
+        // `content_tokens` cache entry
+        // for this `record_id` (a future
+        // `store_information` call with
+        // the same `record_id` is rare
+        // but legal; the cache would
+        // otherwise serve stale tokens
+        // for the new body).
         {
             let mut idx = self.index.write().await;
             idx.add_record(&record, &slug, record_id, content_len as u64);
+            idx.content_tokens.remove(&record_id);
+            if let Err(reason) = crate::index_file::save(&self.config.storage_root, &idx).await {
+                // The `.md` file IS on
+                // disk (the on-disk
+                // source of truth is
+                // durable), but the
+                // sidecar index file
+                // failed to write. This
+                // is non-fatal for the
+                // `store_information`
+                // call (the caller
+                // already has the
+                // `record_id` and the
+                // record is durable),
+                // but the next boot
+                // will be unable to
+                // recover the metadata
+                // from the index file
+                // and will fall back to
+                // the disk-rebuild path
+                // (which is a "best
+                // effort" with metadata
+                // loss). The operator
+                // is warned via
+                // `tracing::error!`.
+                tracing::error!(
+                    record_id = %record_id,
+                    "{reason}; the on-disk .md is durable but the sidecar .index.json failed to write; next boot will fall back to disk-rebuild (v1 limitation)"
+                );
+            }
         }
 
         // Step 7: publish the
