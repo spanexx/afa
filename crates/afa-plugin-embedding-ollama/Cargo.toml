@@ -6,28 +6,41 @@ description = "Ollama HTTP embedding adapter for the AFA Embedding engine. POSTs
 license = "Apache-2.0"
 
 # CID:afa-plugin-embedding-ollama-cargo-001 - dependencies
-# Purpose: The Phase 0 dependency list — pure skeleton,
-# no I/O, no HTTP call. `afa-contracts` for the
-# `EmbeddingV1` trait and the 4 typed errors; `async-trait`
-# for the trait impl; `serde` for the request/response
-# shapes (Phase 2 will add `serde_json` for the JSON
-# body, declared now so the skeleton compiles).
-# Phase 2 adds: `reqwest = { version = "0.12", features =
-# ["json", "rustls-tls"] }` for the HTTP call (already a
-# workspace dep from Pack #4).
+# Purpose: The Phase 0 + Phase 2 dependency list.
+# `afa-contracts` for the `EmbeddingV1` trait and the
+# 4 typed errors; `async-trait` for the trait impl;
+# `serde` + `serde_json` for the request/response
+# shapes (the Ollama `/v1/embeddings` JSON).
+# `thiserror` for any future adapter-internal error
+# type (declared in Phase 0 so the skeleton compiles).
+# `tracing` for the structured log events the
+# HTTP call emits.
+# `reqwest 0.12` with `rustls-tls` + `json` is the
+# async HTTP client (same feature set as
+# `afa-plugin-llm-http`; `rustls-tls` avoids the
+# system-OpenSSL build dep, `json` enables the
+# `.json(body)` ergonomics). `tokio 1` is the
+# async runtime the kernel uses; the
+# `tokio::time::sleep` helper backs the
+# retry-on-5xx exponential backoff.
 [dependencies]
 afa-contracts = { path = "../afa-contracts" }
 async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 tracing = "0.1"
 
 # CID:afa-plugin-embedding-ollama-cargo-002 - dev-dependencies
 # Purpose: Dev-only test extras. `afa-kernel` exercises
 # the end-to-end `Kernel → CapabilityRegistry →
 # EmbeddingV1` round-trip; `wiremock-rs` is the mock
-# HTTP server for Phase 2's conformance tests.
+# HTTP server for Phase 2's conformance tests (the
+# adapter POSTs to wiremock instead of a real Ollama
+# daemon; the mock returns canned `/v1/embeddings`
+# responses for the happy path, 404, 500, 400, etc.).
 [dev-dependencies]
 afa-kernel = { path = "../afa-kernel" }
 tempfile = { workspace = true }

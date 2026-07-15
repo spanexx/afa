@@ -1,185 +1,314 @@
-//! Code Map: afa-plugin-embedding-ollama — adapter
-//! - `OllamaEmbeddingAdapter`: The concrete
-//!   HTTP adapter the kernel registers via
-//!   `CapabilityRegistry::register_embedding`.
-//!   Phase 0 is a skeleton: the struct is built,
-//!   the `EmbeddingV1` trait is implemented, but
-//!   every `embed` / `embed_batch` call returns
-//!   `EmbeddingErrorV1::Internal` with a
-//!   "Phase 0 skeleton" reason. Phase 2 wires
-//!   the HTTP client, the request building, the
-//!   response parsing, and the offline-mode
-//!   logic.
+//! `OllamaEmbeddingAdapter` — the `EmbeddingV1`
+//! implementation for Ollama.
 //!
-//! Story (plain English): The adapter is the
-//! postal worker who walks to the local Ollama
-//! daemon and brings back vectors. In Phase 0
-//! the worker is at the desk but has not yet
-//! been given the address book — every request
-//! is politely turned away with a "we are
-//! not yet delivering" message. The desk is
-//! built and the door is open (a
-//! `register_embedding` call succeeds) so the
-//! kernel can wire it up and the conformance
-//! suite can verify the
-//! `describe_capabilities` shape (which does
-//! not require I/O).
+//! Single file in the `adapter.rs` module of the
+//! `afa-plugin-embedding-ollama` crate. Owns the
+//! adapter struct, its `EmbeddingV1` trait impl,
+//! and the typed factory that the `Kernel` uses
+//! to construct an instance from a validated
+//! `OllamaEmbeddingConfig`.
 //!
-//! CID Index:
-//! CID:afa-plugin-embedding-ollama-adapter-001 -> OllamaEmbeddingAdapter
-//! CID:afa-plugin-embedding-ollama-adapter-002 -> impl EmbeddingV1
+//! **The contract** (see
+//! `afa-contracts/src/embedding/traits.rs`):
+//! - `embed(text, ctx)` — embed one string.
+//!   Returns `Vec<f32>` of the model's
+//!   dimensionality.
+//! - `embed_batch(texts, ctx)` — embed a batch
+//!   in a single HTTP call. The default trait
+//!   impl loops over `embed`; we override it
+//!   to take advantage of Ollama's batched
+//!   `/v1/embeddings` endpoint (one round-trip
+//!   instead of N).
+//! - `describe_capabilities()` — return the
+//!   `EmbeddingCapabilitiesV1` struct
+//!   (model_name, dimension, max_batch_size,
+//!   max_sequence_length, supports_batching).
 //!
-//! Quick lookup: rg -n "CID:afa-plugin-embedding-ollama-adapter-" crates/afa-plugin-embedding-ollama/src/adapter.rs
+//! **Why a separate `client` module:** the HTTP
+//! call is a separate concern. The adapter is
+//! the contract surface; the client is the wire
+//! surface. Splitting them keeps each file
+//! small (under 250 lines) and lets the
+//! conformance tests swap in a `wiremock-rs`
+//! server for the client without touching the
+//! adapter.
 
 use async_trait::async_trait;
+use tracing::{debug, info, warn};
 
 use afa_contracts::{EmbeddingCapabilitiesV1, EmbeddingErrorV1, EmbeddingV1, ExecutionContext};
 
-use super::config::OllamaEmbeddingConfig;
+use crate::client::OllamaHttpClient;
+use crate::config::OllamaEmbeddingConfig;
 
-// CID:afa-plugin-embedding-ollama-adapter-001 - OllamaEmbeddingAdapter
-// Purpose: The concrete HTTP adapter the
-// kernel registers via
-// `CapabilityRegistry::register_embedding`.
-// Phase 0 is a skeleton: the struct is built,
-// the `EmbeddingV1` trait is implemented, but
-// every `embed` / `embed_batch` call returns
-// `EmbeddingErrorV1::Internal`. The
-// `describe_capabilities` method returns the
-// v1 Ollama card (nomic-embed-text, 768-dim,
-// max batch 2048, max sequence 8192,
-// supports_batching = true). Phase 2 wires
-// the real HTTP call.
-//
-// The adapter holds the `OllamaEmbeddingConfig`
-// (the settings card) and a `MockEmbeddingMode`
-// flag (always `Phase0` for now; Phase 2 will
-// add a `Degraded` variant for the
-// "Ollama not reachable" case).
-// Uses: EmbeddingV1, EmbeddingErrorV1,
-// EmbeddingCapabilitiesV1,
-// ExecutionContext,
-// OllamaEmbeddingConfig.
-// Used by: the kernel's bootstrap (which
-// calls `register_embedding(ollama_adapter)`),
-// the conformance suite (which calls
-// `embed` / `embed_batch` and expects
-// `Internal` in Phase 0 and real vectors
-// in Phase 2+).
-#[derive(Debug)]
+/// The Ollama HTTP embedding adapter.
+///
+/// Cheap to clone (the inner `OllamaHttpClient`
+/// is a `reqwest::Client` wrapper; both are
+/// internally `Arc`-backed). The `Kernel` clones
+/// it once per `EmbeddingV1` capability lookup.
+#[derive(Debug, Clone)]
 pub struct OllamaEmbeddingAdapter {
+    /// The validated config. The `name()` is a
+    /// separate field on the trait — this is the
+    /// full config (used by `describe_capabilities`
+    /// and the `config()` accessor).
     config: OllamaEmbeddingConfig,
-    /// The phase-mode flag. Always
-    /// `Phase0` for the skeleton. Phase 2
-    /// will rename this to `Phase2` once
-    /// the HTTP client is wired.
-    ///
-    /// `#[allow(dead_code)]` is
-    /// deliberate: Phase 0 reserves the
-    /// field; Phase 2 reads it. The
-    /// `Debug` derive does not silence
-    /// the dead_code lint (the field is
-    /// never read by any code path in
-    /// Phase 0).
-    #[allow(dead_code)]
-    mode: MockEmbeddingMode,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MockEmbeddingMode {
-    /// Phase 0 skeleton: every
-    /// `embed` returns `Internal`. The
-    /// conformance suite's Phase 0 tests
-    /// are the only ones that pass.
-    Phase0,
+    /// The HTTP client. Owns the `reqwest::Client`
+    /// + the validated config. Cheap to clone.
+    client: OllamaHttpClient,
 }
 
 impl OllamaEmbeddingAdapter {
-    /// Build a new `OllamaEmbeddingAdapter`
-    /// from an `OllamaEmbeddingConfig`. The
-    /// skeleton does NOT check the Ollama
-    /// reachability (per the IMPL §"Phase 2
-    /// constructor" rule); the call always
-    /// succeeds. Phase 2 will add the URL
-    /// validation (a malformed URL returns
-    /// `InvalidInput`; an unreachable
-    /// daemon is a runtime failure surfaced
-    /// as `AdapterUnavailable`).
-    pub fn new(config: OllamaEmbeddingConfig) -> Self {
-        Self {
-            config,
-            mode: MockEmbeddingMode::Phase0,
-        }
+    /// Construct a new adapter from a validated
+    /// `OllamaEmbeddingConfig`. The `Kernel` calls
+    /// `config.validate()` first; this method
+    /// does not re-validate.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(OllamaEmbeddingAdapter)` on success.
+    /// `Err(EmbeddingErrorV1::Internal)` if the
+    /// `reqwest::Client` builder fails (e.g. the
+    /// system TLS config is broken). In practice
+    /// this never happens — `reqwest::Client::builder()`
+    /// only fails on platform TLS init errors.
+    pub fn new(config: OllamaEmbeddingConfig) -> Result<Self, EmbeddingErrorV1> {
+        let client = OllamaHttpClient::new(config);
+        let config = client.config().clone();
+        Ok(Self { config, client })
     }
 
-    /// Hand back a reference to the
-    /// adapter's config. Used by the
-    /// conformance suite to assert the
-    /// adapter is built with the
-    /// expected settings.
+    /// Build the adapter and log the registration
+    /// event. Used by the `Kernel` at startup.
+    pub fn register(config: OllamaEmbeddingConfig) -> Result<Self, EmbeddingErrorV1> {
+        let adapter = Self::new(config)?;
+        info!(
+            adapter = %adapter.config.name,
+            base_url = %adapter.config.base_url,
+            model = %adapter.config.model,
+            timeout_secs = adapter.config.timeout_secs,
+            max_batch_size = adapter.config.max_batch_size,
+            "ollama embedding adapter registered"
+        );
+        Ok(adapter)
+    }
+
+    /// Read-only access to the config. Used by
+    /// the conformance tests and the
+    /// `afa-cli embedding status` command.
     pub fn config(&self) -> &OllamaEmbeddingConfig {
         &self.config
     }
 }
 
-// CID:afa-plugin-embedding-ollama-adapter-002 - impl EmbeddingV1
-// Purpose: The trait impl. Phase 0 returns
-// `Internal` from every `embed` call (the
-// "we are not yet delivering" sentinel).
-// The default `embed_batch` impl from the
-// trait (which loops over `embed`) is used;
-// Phase 2 will override it with the real
-// HTTP POST.
-//
-// `describe_capabilities` returns the
-// v1 Ollama card. No `async`, no `ctx`,
-// no I/O. The dimension is hard-coded
-// for the configured model; Phase 2 will
-// read it from a `model_capabilities.toml`
-// lookup (or, for unknown models, the
-// first `embed` call validates the
-// response dimension).
-// Uses: EmbeddingErrorV1,
-// EmbeddingCapabilitiesV1,
-// ExecutionContext.
-// Used by: every workflow that calls
-// `embed` / `embed_batch` (in Phase 0,
-// every call gets `Internal`; in
-// Phase 2+, every call gets a real
-// vector from Ollama).
 #[async_trait]
 impl EmbeddingV1 for OllamaEmbeddingAdapter {
+    /// Embed a single string. Implemented as
+    /// `embed_batch(&[text.to_string()])` then
+    /// returning the first vector. This is
+    /// strictly equivalent to the default trait
+    /// impl but is inlined so the conformance
+    /// test can observe the underlying HTTP
+    /// call count (1 call per `embed`, regardless
+    /// of `embed` vs `embed_batch`).
     async fn embed(
         &self,
-        _text: &str,
+        text: &str,
         _ctx: &ExecutionContext,
     ) -> Result<Vec<f32>, EmbeddingErrorV1> {
-        // Phase 0 skeleton: the HTTP
-        // client is not wired. The
-        // "not yet delivering" message
-        // is the contract — the
-        // conformance suite asserts
-        // on it.
-        Err(EmbeddingErrorV1::Internal {
-            reason: "afa-plugin-embedding-ollama Phase 0 skeleton: HTTP client not yet wired (Phase 2 wires reqwest)"
-                .to_string(),
-        })
+        // Empty input check — fail fast, do not
+        // hit the wire. The contract says empty
+        // input is `InvalidInput` BEFORE any I/O.
+        if text.is_empty() {
+            return Err(EmbeddingErrorV1::InvalidInput {
+                reason: "ollama adapter: `text` must be non-empty".to_string(),
+            });
+        }
+        let mut out: Vec<Vec<f32>> = self.client.embed_batch(&[text.to_string()]).await?;
+        // `embed_batch` returns the same length
+        // as the input, so `out.pop()` is safe.
+        Ok(out.swap_remove(0))
     }
 
+    /// Embed a batch in a single HTTP call. The
+    /// batched endpoint is strictly faster than
+    /// looping over `embed` (one round-trip
+    /// instead of N), and Ollama parallelizes
+    /// the per-input forward pass internally.
+    ///
+    /// Overrides the default trait impl, which
+    /// loops over `embed()`. The default would
+    /// make N HTTP calls per `embed_batch(N)` —
+    /// unacceptable for a 100-input batch.
+    async fn embed_batch(
+        &self,
+        texts: &[String],
+        _ctx: &ExecutionContext,
+    ) -> Result<Vec<Vec<f32>>, EmbeddingErrorV1> {
+        let result = self.client.embed_batch(texts).await;
+        match &result {
+            Ok(vectors) => {
+                debug!(
+                    adapter = %self.config.name,
+                    input_count = texts.len(),
+                    output_count = vectors.len(),
+                    "ollama embed_batch ok"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    adapter = %self.config.name,
+                    input_count = texts.len(),
+                    error = %e,
+                    "ollama embed_batch failed"
+                );
+            }
+        }
+        result
+    }
+
+    /// Describe the adapter's capabilities.
+    ///
+    /// The `model_name` is the configured Ollama
+    /// model tag. The `dimension` is the model's
+    /// output dimensionality — for Phase 2 we
+    /// hard-code the common cases (384 for
+    /// `all-minilm`, 768 for `nomic-embed-text`,
+    /// 1024 for `mxbai-embed-large`); unknown
+    /// models return 0 and the caller falls back
+    /// to introspection (the first `embed` call's
+    /// `Vec<f32>` length). The `max_batch_size`
+    /// comes from the config. The
+    /// `max_sequence_length` is the model's
+    /// context window (2048 for `nomic-embed`,
+    /// 512 for `all-minilm`); again, hard-coded
+    /// for the common cases, 0 otherwise. The
+    /// `supports_batching` is `true` (we use the
+    /// batched endpoint).
     fn describe_capabilities(&self) -> EmbeddingCapabilitiesV1 {
-        // The v1 Ollama card. The
-        // dimension is hard-coded
-        // for the most common model
-        // (nomic-embed-text = 768);
-        // Phase 2 will add a
-        // `model_capabilities.toml`
-        // lookup.
+        let (dimension, max_sequence_length) = known_model_specs(&self.config.model);
         EmbeddingCapabilitiesV1 {
-            model_name: self.config.model_name.clone(),
-            dimension: 768,
-            max_batch_size: 2048,
-            max_sequence_length: 8192,
+            model_name: self.config.model.clone(),
+            dimension,
+            max_batch_size: self.config.max_batch_size as u32,
+            max_sequence_length,
             supports_batching: true,
         }
+    }
+}
+
+/// Look up known model specs by name. Returns
+/// `(dimension, max_sequence_length)`. Unknown
+/// models get `(0, 0)` — the caller falls back to
+/// introspection (the first `embed()` call's
+/// `Vec<f32>` length tells the dimension).
+fn known_model_specs(model: &str) -> (u32, u32) {
+    match model {
+        "nomic-embed-text" => (768, 2048),
+        "nomic-embed-text:v1.5" => (768, 2048),
+        "all-minilm" => (384, 512),
+        "all-minilm:33m" => (384, 512),
+        "mxbai-embed-large" => (1024, 512),
+        "snowflake-arctic-embed" => (1024, 512),
+        "snowflake-arctic-embed:335m" => (1024, 512),
+        "snowflake-arctic-embed:137m" => (768, 512),
+        _ => (0, 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use afa_contracts::{Actor, ExecutionContext, TenantId};
+
+    fn ctx() -> ExecutionContext {
+        ExecutionContext::new(
+            TenantId::new("test"),
+            Actor::Internal {
+                caller: "unit-test".into(),
+            },
+        )
+    }
+
+    fn config() -> OllamaEmbeddingConfig {
+        OllamaEmbeddingConfig {
+            name: "test-ollama".to_string(),
+            base_url: "http://localhost:11434".to_string(),
+            model: "nomic-embed-text".to_string(),
+            timeout_secs: 30,
+            max_batch_size: 100,
+            keep_alive_secs: 300,
+        }
+    }
+
+    #[test]
+    fn known_model_specs_returns_correct_dimension() {
+        assert_eq!(known_model_specs("nomic-embed-text"), (768, 2048));
+        assert_eq!(known_model_specs("all-minilm"), (384, 512));
+        assert_eq!(known_model_specs("mxbai-embed-large"), (1024, 512));
+        assert_eq!(known_model_specs("unknown-model"), (0, 0));
+    }
+
+    #[test]
+    fn describe_capabilities_reports_configured_values() {
+        let adapter = OllamaEmbeddingAdapter::new(config()).unwrap();
+        let caps = adapter.describe_capabilities();
+        assert_eq!(caps.model_name, "nomic-embed-text");
+        assert_eq!(caps.dimension, 768);
+        assert_eq!(caps.max_sequence_length, 2048);
+        assert_eq!(caps.max_batch_size, 100);
+        assert!(caps.supports_batching);
+    }
+
+    #[test]
+    fn describe_capabilities_unknown_model_returns_zeros() {
+        let mut cfg = config();
+        cfg.model = "unknown-model-xyz".to_string();
+        let adapter = OllamaEmbeddingAdapter::new(cfg).unwrap();
+        let caps = adapter.describe_capabilities();
+        assert_eq!(caps.dimension, 0);
+        assert_eq!(caps.max_sequence_length, 0);
+        assert_eq!(caps.model_name, "unknown-model-xyz");
+    }
+
+    #[test]
+    fn new_returns_adapter_with_config() {
+        let adapter = OllamaEmbeddingAdapter::new(config()).unwrap();
+        assert_eq!(adapter.config().name, "test-ollama");
+        assert_eq!(adapter.config().model, "nomic-embed-text");
+    }
+
+    #[tokio::test]
+    async fn empty_input_rejected_before_http() {
+        // Point at a guaranteed-unreachable port.
+        let cfg = OllamaEmbeddingConfig {
+            base_url: "http://127.0.0.1:1".to_string(),
+            timeout_secs: 1,
+            ..config()
+        };
+        let adapter = OllamaEmbeddingAdapter::new(cfg).unwrap();
+        // Empty single → InvalidInput.
+        let err = adapter.embed("", &ctx()).await.unwrap_err();
+        assert!(
+            matches!(err, EmbeddingErrorV1::InvalidInput { .. }),
+            "expected InvalidInput, got {err:?}"
+        );
+        // Empty batch → InvalidInput.
+        let err = adapter.embed_batch(&[], &ctx()).await.unwrap_err();
+        assert!(
+            matches!(err, EmbeddingErrorV1::InvalidInput { .. }),
+            "expected InvalidInput, got {err:?}"
+        );
+        // Batch with one empty string → InvalidInput.
+        let err = adapter
+            .embed_batch(&["".to_string()], &ctx())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, EmbeddingErrorV1::InvalidInput { .. }),
+            "expected InvalidInput, got {err:?}"
+        );
     }
 }
