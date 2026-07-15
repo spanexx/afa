@@ -1,26 +1,26 @@
+#![allow(clippy::doc_lazy_continuation)]
 //! Code Map: afa-plugin-embedding-local
 //! - `LocalEmbeddingAdapter`: The concrete
 //!   candle-based adapter the kernel registers
 //!   via `CapabilityRegistry::register_embedding`.
-//!   Phase 0 is a skeleton: the struct is built,
-//!   the `EmbeddingV1` trait is implemented, but
-//!   every `embed` / `embed_batch` call returns
-//!   `EmbeddingErrorV1::Internal` (the "not yet
-//!   implemented" sentinel). Phase 1 wires the
-//!   candle model load, the lazy HuggingFace
-//!   download, the batched forward pass, and the
-//!   offline-mode logic.
+//!   Phase 1 wires the candle model load, the
+//!   lazy HuggingFace download, and the strict /
+//!   degraded mode logic.
 //! - `LocalEmbeddingConfig`: The settings card
-//!   the adapter is built with. Phase 0 declares
-//!   the fields; Phase 1 reads them.
+//!   the adapter is built with.
+//! - `OfflineMode`, `DownloadStrategy`: The
+//!   config enums.
+//! - `BertEmbedder` (re-exported from `model`):
+//!   The wrapped candle `BertModel` + tokenizer.
+//! - `Downloader` (re-exported from `download`):
+//!   The HuggingFace download helper with
+//!   SHA-256 verification.
 //!
 //! Story (plain English): This is the entry
 //! point of the `afa-plugin-embedding-local`
-//! crate. It re-exports the two public types
-//! the kernel and the conformance suite touch:
-//! the adapter (what the kernel hands out) and
-//! the config (the settings card). Everything
-//! else is module-private.
+//! crate. It re-exports the 6 public types the
+//! kernel and the conformance suite touch.
+//! Everything else is module-private.
 //!
 //! CID Index:
 //! CID:afa-plugin-embedding-local-lib-001 -> module re-exports
@@ -29,6 +29,11 @@
 
 pub mod adapter;
 pub mod config;
+pub mod download;
+pub mod model;
+pub mod offline;
 
 pub use adapter::LocalEmbeddingAdapter;
-pub use config::LocalEmbeddingConfig;
+pub use config::{DownloadStrategy, LocalEmbeddingConfig, OfflineMode};
+pub use download::Downloader;
+pub use model::BertEmbedder;

@@ -19,18 +19,88 @@ license = "Apache-2.0"
 # `sha2 0.11.0` (the 5 new runtime deps per the IMPL
 # §4.2 and TRD §3.1-3.5). Phase 1 also adds `ureq` or
 # `reqwest` for the lazy HuggingFace download.
+# CID:afa-plugin-embedding-local-cargo-001 - dependencies
+# Purpose: The Phase 1 dependency list. Pure-Rust
+# only (per ADR-029 "no native C++ deps" — the
+# `tch` alternative is rejected because it requires
+# `libtorch` at build time, which violates the
+# single-binary deployment model). Phase 0
+# declared the same 4 deps (afa-contracts,
+# async-trait, serde, thiserror) for the skeleton.
+# Phase 1 adds 5 runtime deps for the candle BERT
+# forward pass + the HuggingFace tokenization:
+#   - `candle-core 0.11.0` (the tensor library)
+#   - `candle-nn 0.11.0` (the neural-network ops,
+#     used for the `softmax` attention mask)
+#   - `candle-transformers 0.11.0` (the
+#     `candle_transformers::models::bert::BertModel`
+#     struct + the `Config` it reads from
+#     `config.json`)
+#   - `tokenizers 0.23.1` (the HuggingFace
+#     tokenizers crate, used to turn text into
+#     token ids + attention masks)
+#   - `sha2 0.11.0` (for SHA-256 verification of
+#     downloaded model files, per the ADR-027
+#     "Model-Storage-Path" rule that says "the
+#     operator must be able to verify a download
+#     by SHA-256")
+#   - `ureq 2` (sync HTTP client for the lazy
+#     download — sync because the download is
+#     one-shot at adapter construction or the
+#     first embed call, not in the hot loop; the
+#     `async-trait` `embed` method then wraps
+#     the sync download with
+#     `tokio::task::spawn_blocking` so the hot
+#     loop stays async)
+#   - `tokio 1` (the async runtime the kernel
+#     uses; the `spawn_blocking` helper is in
+#     `tokio::task`)
+#   - `tracing 0.1` (for the structured log
+#     events the download and the forward pass
+#     emit; already a workspace dep from
+#     Pack #3-4)
 [dependencies]
 afa-contracts = { path = "../afa-contracts" }
 async-trait = "0.1"
+hex = "0.4"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
 thiserror = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
 tracing = "0.1"
+ureq = "2"
+
+# Phase 1.5 deps (candle).
+# Added when the real
+# BERT forward pass is
+# wired. The candle
+# stack is pure-Rust
+# (per ADR-029 "no native
+# C++ deps" — the `tch`
+# alternative is rejected
+# because it requires
+# `libtorch` at build time,
+# which violates the
+# single-binary deployment
+# model).
+candle-core = "0.11"
+candle-nn = "0.11"
+candle-transformers = "0.11"
+tokenizers = "0.23"
 
 # CID:afa-plugin-embedding-local-cargo-002 - dev-dependencies
 # Purpose: Dev-only test extras. `afa-kernel` exercises
 # the end-to-end `Kernel → CapabilityRegistry →
 # EmbeddingV1` round-trip in an integration test.
+# `wiremock-rs` serves canned HuggingFace responses
+# for the lazy-download conformance test.
+# `tempfile` is used to build the
+# `<afa_data_root>/embedding/models/<model_name>/`
+# directory in a fresh tempdir (the test never
+# touches the operator's real data root).
 [dev-dependencies]
 afa-kernel = { path = "../afa-kernel" }
 tempfile = { workspace = true }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+wiremock = "0.6"
