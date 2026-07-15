@@ -119,7 +119,7 @@ pub mod scheduler;
 // downstream code stay on the
 // `afa_kernel::KnowledgeV1` path rather than
 // reaching into `afa_contracts` directly.
-pub use afa_contracts::{KnowledgeV1, LlmV1};
+pub use afa_contracts::{EmbeddingV1, KnowledgeV1, LlmV1};
 pub use capability_registry::{CapabilityRegistry, RegisterError};
 pub use kernel::Kernel;
 pub use scheduler::Step;

@@ -1,0 +1,35 @@
+[package]
+name = "afa-plugin-embedding-ollama"
+version = "0.1.0"
+edition = "2021"
+description = "Ollama HTTP embedding adapter for the AFA Embedding engine. POSTs to <ollama_url>/v1/embeddings and exposes the EmbeddingV1 contract."
+license = "Apache-2.0"
+
+# CID:afa-plugin-embedding-ollama-cargo-001 - dependencies
+# Purpose: The Phase 0 dependency list — pure skeleton,
+# no I/O, no HTTP call. `afa-contracts` for the
+# `EmbeddingV1` trait and the 4 typed errors; `async-trait`
+# for the trait impl; `serde` for the request/response
+# shapes (Phase 2 will add `serde_json` for the JSON
+# body, declared now so the skeleton compiles).
+# Phase 2 adds: `reqwest = { version = "0.12", features =
+# ["json", "rustls-tls"] }` for the HTTP call (already a
+# workspace dep from Pack #4).
+[dependencies]
+afa-contracts = { path = "../afa-contracts" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+# CID:afa-plugin-embedding-ollama-cargo-002 - dev-dependencies
+# Purpose: Dev-only test extras. `afa-kernel` exercises
+# the end-to-end `Kernel → CapabilityRegistry →
+# EmbeddingV1` round-trip; `wiremock-rs` is the mock
+# HTTP server for Phase 2's conformance tests.
+[dev-dependencies]
+afa-kernel = { path = "../afa-kernel" }
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+wiremock = "0.6"

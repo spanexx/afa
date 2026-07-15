@@ -1,0 +1,36 @@
+[package]
+name = "afa-plugin-embedding-local"
+version = "0.1.0"
+edition = "2021"
+description = "Local candle-based embedding adapter for the AFA Embedding engine. Wraps a HuggingFace-format BERT model (default: all-MiniLM-L6-v2) and exposes the EmbeddingV1 contract."
+license = "Apache-2.0"
+
+# CID:afa-plugin-embedding-local-cargo-001 - dependencies
+# Purpose: The Phase 0 dependency list — pure skeleton,
+# no I/O, no model loading. `afa-contracts` for the
+# `EmbeddingV1` trait and the 4 typed errors; `async-trait`
+# for the trait impl; `serde` for the `EmbeddingCapabilitiesV1`
+# struct (already derives Serialize/Deserialize in the
+# contracts crate); `thiserror` for any future
+# adapter-internal error type (declared now so the
+# skeleton compiles).
+# Phase 1 adds: `candle-core 0.11.0`, `candle-nn 0.11.0`,
+# `candle-transformers 0.11.0`, `tokenizers 0.23.1`,
+# `sha2 0.11.0` (the 5 new runtime deps per the IMPL
+# §4.2 and TRD §3.1-3.5). Phase 1 also adds `ureq` or
+# `reqwest` for the lazy HuggingFace download.
+[dependencies]
+afa-contracts = { path = "../afa-contracts" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+
+# CID:afa-plugin-embedding-local-cargo-002 - dev-dependencies
+# Purpose: Dev-only test extras. `afa-kernel` exercises
+# the end-to-end `Kernel → CapabilityRegistry →
+# EmbeddingV1` round-trip in an integration test.
+[dev-dependencies]
+afa-kernel = { path = "../afa-kernel" }
+tempfile = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }

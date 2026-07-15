@@ -19,6 +19,11 @@
 //! - `versioning_example`: A worked example of the "add a new
 //!   socket, never change V1" versioning rule. See
 //!   `versioning_example.rs`.
+//! - `embedding`: The v1 Embedding engine contract: the
+//!   trait (`EmbeddingV1`), the error type
+//!   (`EmbeddingErrorV1`), the capabilities card
+//!   (`EmbeddingCapabilitiesV1`), and the three audit
+//!   events. See `embedding/mod.rs` for the Code Map.
 //!
 //! Story (plain English): This file is the front door of the
 //! shared types library. The other files in this folder hold the
@@ -118,7 +123,23 @@ pub mod security;
 // Used by: the conformance test in `afa-contract-testing` and
 // every real plugin that follows the pattern.
 pub mod versioning_example;
+// CID:afa-contracts-lib-010 - embedding
+// Purpose: Re-export the v1 Embedding engine contract: the
+// trait (`EmbeddingV1`), the error type
+// (`EmbeddingErrorV1`), the capabilities card
+// (`EmbeddingCapabilitiesV1`), and the three audit events
+// (`EmbeddingRequested`/`EmbeddingCompleted`/`EmbeddingFailed`).
+// See `embedding/mod.rs` for the Code Map.
+// Used by: the `afa-plugin-embedding-local` and
+// `afa-plugin-embedding-ollama` adapters (which implement the
+// trait), Pack #24 ingestion (which calls `embed_batch`),
+// and the conformance suite in `afa-contract-testing`.
+pub mod embedding;
 
+pub use embedding::{
+    EmbeddingCapabilitiesV1, EmbeddingCompleted, EmbeddingErrorKind, EmbeddingErrorV1,
+    EmbeddingFailed, EmbeddingRequested, EmbeddingV1, EmbeddingV1Version,
+};
 pub use error::{AfaError, AfaErrorKind, ExampleStoreErrorV1};
 pub use events::{AfaEvent, ExampleLessonCreated};
 pub use execution_context::{Actor, ExecutionContext};

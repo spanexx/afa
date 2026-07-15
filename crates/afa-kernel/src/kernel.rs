@@ -34,7 +34,7 @@ use crate::capability_registry::{CapabilityRegistry, RegisterError};
 use crate::event_bus::{EventBus, EventBusHandle};
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
-use afa_contracts::{KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1};
+use afa_contracts::{EmbeddingV1, KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1};
 use afa_security::{MasterKey, SealedSecretStore, SecurityEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -298,6 +298,58 @@ impl Kernel {
             .lock()
             .expect("capabilities mutex")
             .knowledge(key)
+    }
+
+    /// Register an embedding adapter with
+    /// the kernel's `CapabilityRegistry`.
+    /// This is the composition-root entry
+    /// point for the embedding capability:
+    /// a bootstrap handler (an `axum`
+    /// route, a CLI command, or an
+    /// integration test) builds a concrete
+    /// adapter (e.g.
+    /// `LocalEmbeddingAdapter` for the
+    /// candle backend, or
+    /// `OllamaEmbeddingAdapter` for the
+    /// HTTP backend), wraps it in an
+    /// `Arc<dyn EmbeddingV1>`, and hands
+    /// it to this method. A second call is
+    /// a programmer error and returns
+    /// `RegisterError::EmbeddingAlreadyRegistered`
+    /// (the registry holds a single
+    /// embedding slot — see
+    /// `docs/engines/CapabilityRegistry.md`).
+    /// Pack #24 (ingestion) will call
+    /// `kernel.embedding()` to get the
+    /// adapter and call `embed_batch` on
+    /// the chunked text.
+    pub fn register_embedding(&self, adapter: Arc<dyn EmbeddingV1>) -> Result<(), RegisterError> {
+        self.capabilities
+            .lock()
+            .expect("capabilities mutex")
+            .register_embedding(adapter)
+    }
+
+    /// Hand out a clone of the `Arc<dyn
+    /// EmbeddingV1>` the registry is
+    /// currently holding, or `None` if no
+    /// adapter has been registered.
+    /// Mirrors `llm()` / `knowledge()` in
+    /// shape (a fresh `Arc` per call, the
+    /// underlying instance is shared).
+    /// Used by Pack #24 (ingestion) —
+    /// `kernel.embedding().expect("no
+    /// embedding configured")` is the
+    /// canonical pattern. A workflow that
+    /// runs before the bootstrap
+    /// registers an adapter sees `None`
+    /// and surfaces a clear "embedding not
+    /// configured" error.
+    pub fn embedding(&self) -> Option<Arc<dyn EmbeddingV1>> {
+        self.capabilities
+            .lock()
+            .expect("capabilities mutex")
+            .embedding()
     }
 }
 

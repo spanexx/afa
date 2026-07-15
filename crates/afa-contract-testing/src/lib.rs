@@ -21,6 +21,7 @@
 //! CID Index:
 //! CID:afa-contract-testing-lib-001 -> fixtures
 //! CID:afa-contract-testing-lib-002 -> harness
+//! CID:afa-contract-testing-lib-003 -> embedding
 //!
 //! Quick lookup: rg -n "CID:afa-contract-testing-lib-" crates/afa-contract-testing/src/lib.rs
 
@@ -34,3 +35,27 @@ pub mod fixtures;
 // Purpose: Re-export the `run_suite!` macro module.
 // Used by: every conformance test in every downstream crate.
 pub mod harness;
+// CID:afa-contract-testing-lib-003 - embedding
+// Purpose: Re-export the embedding
+// conformance module (mock adapter + 12
+// assertions for the `EmbeddingV1`
+// contract, run via `run_suite!`).
+// Used by: Pack #25 (`afa-plugin-embedding-local`,
+// `afa-plugin-embedding-ollama`) to verify
+// the adapters conform to the v1 contract;
+// `afa-cli embedding status` uses the mock
+// to display the v1 card in dev mode.
+// See `embedding/mod.rs` for the Code Map.
+//
+// The `#[cfg(test)]` gate is deliberate:
+// the embedding module depends on the
+// `paste` crate (used by the `run_suite!`
+// macro) and the `async-trait` crate
+// (used by the mock adapter), both of
+// which are dev-deps of
+// `afa-contract-testing` (the lib target
+// is just the `fixtures` + `harness`
+// exports; the conformance tests run in
+// `cargo test`, not in the lib).
+#[cfg(test)]
+pub mod embedding;

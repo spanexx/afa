@@ -11,6 +11,8 @@ members = [
     "crates/afa-plugin-llm-chat-completions",
     "crates/afa-knowledge",
     "crates/afa-plugin-knowledge-json",
+    "crates/afa-plugin-embedding-local",
+    "crates/afa-plugin-embedding-ollama",
 ]
 
 [workspace.dependencies]

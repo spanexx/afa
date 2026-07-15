@@ -10,6 +10,12 @@
 //!   gets the `Arc<dyn LlmV1>` it can call
 //!   `complete` / `stream_complete` on.
 //!
+//! - `register_embedding`: Insert an embedding adapter into
+//!   the slot (a single slot, like the LLM slot).
+//! - `embedding`: Hand back a clone of the `Arc<dyn
+//!   EmbeddingV1>` so a workflow can call `embed` /
+//!   `embed_batch`.
+//!
 //! Story (plain English): The capability registry is
 //! the switchboard's little card index. The
 //! switchboard operator (`Kernel`) keeps a stack of
@@ -26,6 +32,8 @@
 //! CID:capability-registry-001 -> CapabilityRegistry
 //! CID:capability-registry-002 -> register_llm
 //! CID:capability-registry-003 -> llm
+//! CID:capability-registry-006 -> register_embedding
+//! CID:capability-registry-007 -> embedding
 //!
 //! Quick lookup: rg -n "CID:capability-registry-" crates/afa-kernel/src/capability_registry.rs
 
@@ -33,7 +41,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use afa_contracts::{KnowledgeV1, LlmV1};
+use afa_contracts::{EmbeddingV1, KnowledgeV1, LlmV1};
 use thiserror::Error;
 
 // CID:capability-registry-001 - CapabilityRegistry
@@ -93,6 +101,14 @@ pub struct CapabilityRegistry {
     /// hand back the path; a future
     /// health-check surface will).
     knowledge: HashMap<String, (Arc<dyn KnowledgeV1>, PathBuf)>,
+    /// The registered embedding adapter.
+    /// A single slot (like the LLM slot).
+    /// `None` until `register_embedding`
+    /// is called at startup. Pack #24
+    /// (ingestion) calls `embed_batch` on
+    /// this adapter to embed chunks for
+    /// topic routing.
+    embedding: Option<Arc<dyn EmbeddingV1>>,
 }
 
 /// The "could not register" reasons. The
@@ -120,6 +136,13 @@ pub enum RegisterError {
     /// default key.
     #[error("knowledge adapter already registered under key `{key}`")]
     KnowledgeAlreadyRegistered { key: String },
+    /// The embedding slot is already
+    /// occupied. A second
+    /// `register_embedding` call is a
+    /// programmer error (the kernel
+    /// constructor is the only caller).
+    #[error("embedding adapter already registered")]
+    EmbeddingAlreadyRegistered,
 }
 
 impl CapabilityRegistry {
@@ -215,6 +238,52 @@ impl CapabilityRegistry {
     // `knowledge.list_topics`.
     pub fn knowledge(&self, key: &str) -> Option<Arc<dyn KnowledgeV1>> {
         self.knowledge.get(key).map(|(adapter, _)| adapter.clone())
+    }
+
+    // CID:capability-registry-006 - register_embedding
+    // Purpose: Insert an embedding adapter
+    // into the slot. Returns
+    // `Err(RegisterError::EmbeddingAlreadyRegistered)`
+    // if a second adapter is registered
+    // (the kernel constructor is the only
+    // caller). Mirrors the `register_llm`
+    // pattern; a single embedding slot is
+    // the v1 design (a future pack that
+    // needs multiple embeddings can split
+    // the slot, but the v1 single-slot
+    // design is simpler and matches the
+    // "one embedding model per kernel"
+    // operator story).
+    // Uses: EmbeddingV1.
+    // Used by: `Kernel::new` (the
+    // canonical place to register an
+    // embedding adapter).
+    pub fn register_embedding(
+        &mut self,
+        adapter: Arc<dyn EmbeddingV1>,
+    ) -> Result<(), RegisterError> {
+        if self.embedding.is_some() {
+            return Err(RegisterError::EmbeddingAlreadyRegistered);
+        }
+        self.embedding = Some(adapter);
+        Ok(())
+    }
+
+    // CID:capability-registry-007 - embedding
+    // Purpose: Hand back a clone of the
+    // `Arc<dyn EmbeddingV1>` so a workflow
+    // can call `embed` / `embed_batch`.
+    // Returns `None` if no adapter was
+    // registered (a workflow that needs an
+    // embedding can branch on `None` and
+    // surface a clear "no embedding
+    // configured" error). Used by Pack
+    // #24 (ingestion).
+    // Uses: EmbeddingV1.
+    // Used by: every workflow that calls
+    // `embed` / `embed_batch`.
+    pub fn embedding(&self) -> Option<Arc<dyn EmbeddingV1>> {
+        self.embedding.clone()
     }
 }
 
