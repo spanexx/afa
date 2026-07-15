@@ -58,9 +58,14 @@ name = "afa-contract-testing"
 version = "0.1.0"
 dependencies = [
  "afa-contracts",
+ "afa-plugin-embedding-local",
+ "afa-plugin-embedding-ollama",
  "async-trait",
  "paste",
+ "serde_json",
+ "tempfile",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]

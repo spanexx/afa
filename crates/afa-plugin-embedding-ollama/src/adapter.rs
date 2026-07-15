@@ -121,9 +121,10 @@ impl EmbeddingV1 for OllamaEmbeddingAdapter {
         // Empty input check — fail fast, do not
         // hit the wire. The contract says empty
         // input is `InvalidInput` BEFORE any I/O.
-        if text.is_empty() {
+        if text.trim().is_empty() {
             return Err(EmbeddingErrorV1::InvalidInput {
-                reason: "ollama adapter: `text` must be non-empty".to_string(),
+                reason: "ollama adapter: `text` must be non-empty and not whitespace-only"
+                    .to_string(),
             });
         }
         let mut out: Vec<Vec<f32>> = self.client.embed_batch(&[text.to_string()]).await?;
@@ -295,11 +296,17 @@ mod tests {
             matches!(err, EmbeddingErrorV1::InvalidInput { .. }),
             "expected InvalidInput, got {err:?}"
         );
-        // Empty batch → InvalidInput.
-        let err = adapter.embed_batch(&[], &ctx()).await.unwrap_err();
+        // Empty batch → Ok(empty vec) per the v1 contract
+        // (the batch is a no-op, NOT an error; the conformance
+        // suite asserts this so the same call shape works on
+        // the local adapter and the mock).
+        let vectors = adapter
+            .embed_batch(&[], &ctx())
+            .await
+            .expect("empty batch should succeed with no vectors");
         assert!(
-            matches!(err, EmbeddingErrorV1::InvalidInput { .. }),
-            "expected InvalidInput, got {err:?}"
+            vectors.is_empty(),
+            "empty batch should return an empty vector list"
         );
         // Batch with one empty string → InvalidInput.
         let err = adapter

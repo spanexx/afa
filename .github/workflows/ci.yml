@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - feature/**
+  pull_request:
+
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Workspace gates
+        run: make check
+
+  embedding-conformance-ollama:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Real Ollama conformance
+        run: cargo test -p afa-contract-testing --features real-ollama-conformance
+
+  embedding-conformance-local:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Real local conformance
+        shell: bash
+        run: |
+          set -euo pipefail
+          FIXTURE_DIR="crates/afa-plugin-embedding-local/tests/fixtures/model"
+          if [ ! -f "${FIXTURE_DIR}/config.json" ]; then
+            echo "Local embedding fixture missing; skipping real-local-conformance lane."
+            exit 0
+          fi
+          AFA_EMBEDDING_LOCAL_FIXTURE_DIR="$(pwd)/crates/afa-plugin-embedding-local/tests/fixtures" \
+            cargo test -p afa-contract-testing --features real-local-conformance

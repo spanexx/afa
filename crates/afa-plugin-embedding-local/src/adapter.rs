@@ -441,9 +441,9 @@ impl EmbeddingV1 for LocalEmbeddingAdapter {
         // confusing
         // near-zero
         // embedding.
-        if text.is_empty() {
+        if text.trim().is_empty() {
             return Err(EmbeddingErrorV1::InvalidInput {
-                reason: "text is empty; the embedding engine does not embed empty strings"
+                reason: "text is empty or whitespace-only; the embedding engine does not embed blank strings"
                     .to_string(),
             });
         }
@@ -497,10 +497,13 @@ impl EmbeddingV1 for LocalEmbeddingAdapter {
         // strings before
         // calling
         // `embed_batch`).
-        if let Some(empty_idx) = texts.iter().position(String::is_empty) {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some(empty_idx) = texts.iter().position(|text| text.trim().is_empty()) {
             return Err(EmbeddingErrorV1::InvalidInput {
                 reason: format!(
-                    "text at index {empty_idx} is empty; the embedding engine does not embed empty strings"
+                    "text at index {empty_idx} is empty or whitespace-only; the embedding engine does not embed blank strings"
                 ),
             });
         }

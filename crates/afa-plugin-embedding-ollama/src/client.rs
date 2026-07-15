@@ -299,14 +299,14 @@ impl OllamaHttpClient {
         // the wire. The contract says empty input
         // is `InvalidInput` BEFORE any I/O.
         if inputs.is_empty() {
-            return Err(EmbeddingErrorV1::InvalidInput {
-                reason: "ollama adapter: `inputs` must be non-empty".to_string(),
-            });
+            return Ok(Vec::new());
         }
         for (i, t) in inputs.iter().enumerate() {
-            if t.is_empty() {
+            if t.trim().is_empty() {
                 return Err(EmbeddingErrorV1::InvalidInput {
-                    reason: format!("ollama adapter: input at index {i} is empty"),
+                    reason: format!(
+                        "ollama adapter: input at index {i} is empty or whitespace-only"
+                    ),
                 });
             }
         }
@@ -440,6 +440,7 @@ impl OllamaHttpClient {
             return AttemptOutcome::NonRetryable(Self::map_4xx(
                 status.as_u16(),
                 &body_text,
+                &self.config.model,
                 &self.config.name,
             ));
         }
@@ -491,10 +492,10 @@ impl OllamaHttpClient {
     /// 404 → `ModelUnavailable` (the operator
     /// hasn't pulled the model). Everything else
     /// → `InvalidInput` (the request is bad).
-    fn map_4xx(status: u16, body: &str, _adapter_name: &str) -> EmbeddingErrorV1 {
+    fn map_4xx(status: u16, body: &str, model_name: &str, _adapter_name: &str) -> EmbeddingErrorV1 {
         if status == 404 {
             return EmbeddingErrorV1::ModelUnavailable {
-                model_name: "<from config>".to_string(),
+                model_name: model_name.to_string(),
                 reason: format!("HTTP 404 from /v1/embeddings — is the model pulled? body: {body}"),
             };
         }
