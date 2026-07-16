@@ -297,12 +297,14 @@ pub async fn check_schema_version(storage: &Storage) -> Result<u32, StorageError
                     // 0".
                     None
                 }
-                Err(e) => return Err(StorageError::Migrate { version: 0, source: e }),
+                Err(e) => {
+                    return Err(StorageError::Migrate {
+                        version: 0,
+                        source: e,
+                    })
+                }
             };
-            let version: u32 = found
-                .as_deref()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
+            let version: u32 = found.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
             Ok::<u32, StorageError>(version)
         })
     })

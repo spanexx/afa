@@ -1,6 +1,6 @@
 //! Test: `open_storage` on a path that
 //! does not exist creates the SQLite file, runs the
-//! idempotent schema, and records `schema_version = 1` in
+//! idempotent schema, and records `schema_version = 2` in
 //! the `afa_security_meta` table. The next call to
 //! `open_storage` on the same path is a no-op (the
 //! schema `CREATE TABLE IF NOT EXISTS` and `INSERT OR
@@ -11,7 +11,18 @@
 //! the kernel, the kernel tries to open the secrets
 //! database, and the database is not there. The assertion
 //! is on the on-disk schema state (the file exists, the
-//! tables exist, the `schema_version` row is `1`).
+//! tables exist, the `schema_version` row is `2`).
+//!
+//! **Updated for Phase 0.5b**: a fresh first boot runs
+//! both migration v1 (creates the schema) and v2 (adds
+//! the `sha256` column + bumps the version row). The
+//! expected final state is `schema_version = 2`, not
+//! `1`. The pre-0.5b version of this assertion was
+//! written for the v1-only world; the Phase 0.5b commit
+//! (627ba86) updated the schema but did not update this
+//! assertion. Fixing the assertion now is a Phase 1
+//! hygiene task (no live `schema_version = 1` state
+//! exists on any ship-able path).
 
 use afa_contracts::StorageError;
 use afa_security::open_storage;
@@ -57,7 +68,10 @@ async fn open_or_create_creates_file_and_schema() {
             |row| row.get(0),
         )
         .expect("read schema_version");
-    assert_eq!(schema_version, "1", "schema_version should be 1");
+    assert_eq!(
+        schema_version, "2",
+        "schema_version should be 2 (after Phase 0.5b v2 migration)"
+    );
 }
 
 #[tokio::test]
@@ -90,7 +104,9 @@ async fn open_or_create_creates_parent_directories() {
         "precondition: parent missing"
     );
 
-    let _store = open_storage(&path).await.expect("open_or_create creates parents");
+    let _store = open_storage(&path)
+        .await
+        .expect("open_or_create creates parents");
 
     assert!(path.exists(), "file should be created with parents");
 }

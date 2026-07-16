@@ -14,11 +14,11 @@
 //! - `master_key`: The `MasterKey` newtype + the
 //!   `from_hex` constructor.
 //! - `storage`: The `Storage` re-export (was
-//!   `SealedSecretStore` in pre-Phase-0.5a) +
-//!   `SCHEMA_MIGRATIONS` + the three constants
-//!   (`SCHEMA_VERSION`, `STATUS_ACTIVE`, `STATUS_ROTATED`)
-//!   + the `check_schema_version` / `open_storage`
-//!   helpers.
+//!   `SealedSecretStore` in pre-Phase-0.5a). Also
+//!   includes `SCHEMA_MIGRATIONS`, the three
+//!   constants (`SCHEMA_VERSION`, `STATUS_ACTIVE`,
+//!   `STATUS_ROTATED`), and the `check_schema_version`
+//!   and `open_storage` helpers.
 //! - `engine`: The `SecurityEngine` struct and the
 //!   `impl SecurityV1` block (seal, unseal, rotate,
 //!   lookup_hash).

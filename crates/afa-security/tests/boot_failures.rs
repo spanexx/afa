@@ -53,7 +53,7 @@
 //! Quick lookup: rg -n "CID:afa-security-boot-" crates/afa-security/tests/boot_failures.rs
 
 use afa_contracts::{SecurityErrorV1, StorageError};
-use afa_security::{MasterKey, open_storage};
+use afa_security::{open_storage, MasterKey};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

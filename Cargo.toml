@@ -14,14 +14,15 @@ members = [
     "crates/afa-plugin-embedding-local",
     "crates/afa-plugin-embedding-ollama",
     "crates/afa-storage",
+    "crates/afa-observability",
 ]
 
 [workspace.dependencies]
 # SSE (Server-Sent Events) parser used by
 # the streaming adapters (`stream_complete`).
 # The `Stream<Item = Result<Bytes, _>>` of a
-# reqwest response is `.eventsource()`-ed into
-# a `Stream<Item = Result<Event, _>>` of typed
+# reqwest response is `.eventsource()`-ed into a
+# `Stream<Item = Result<Event, _>>` of typed
 # SSE events.
 eventsource-stream = "0.2"
 

@@ -81,7 +81,10 @@ use crate::events;
 use crate::master_key::MasterKey;
 use crate::storage::{Storage, STATUS_ACTIVE, STATUS_ROTATED};
 use afa_bus::EventBus;
-use afa_contracts::{Actor, ExecutionContext, SecretRef, SecurityErrorV1 as SecurityError, SecurityV1, TenantId, UnsealedSecret};
+use afa_contracts::{
+    Actor, ExecutionContext, SecretRef, SecurityErrorV1 as SecurityError, SecurityV1, TenantId,
+    UnsealedSecret,
+};
 use async_trait::async_trait;
 use rusqlite::{OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -249,69 +252,63 @@ impl SecurityV1 for SecurityEngine {
         // code relied on. **Doc drift correction #5
         // vs. the IMPL draft** — see the module-level
         // comment.
-        let (next_version, timestamp) = afa_storage::with_conn(
-            &self.storage,
-            |conn| {
-                Box::pin(async move {
-                    let tx = conn
-                        .transaction_with_behavior(TransactionBehavior::Immediate)?;
-                    let next_version: u32 = tx
-                        .query_row(
-                            "SELECT COALESCE(MAX(version), 0) + 1 FROM sealed_secrets WHERE name = ?1",
-                            rusqlite::params![name],
-                            |row| row.get(0),
-                        )?;
+        let (next_version, timestamp) = afa_storage::with_conn(&self.storage, |conn| {
+            Box::pin(async move {
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let next_version: u32 = tx.query_row(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM sealed_secrets WHERE name = ?1",
+                    rusqlite::params![name],
+                    |row| row.get(0),
+                )?;
 
-                    // Encrypt under the master key with the
-                    // AAD bound to (name, version). A row-
-                    // swap attack (replacing one secret's
-                    // ciphertext with another's) cannot
-                    // succeed because the AAD changes. The
-                    // `&self.key` here is `&Arc<Zeroizing<...>>`
-                    // and deref-coerces to `&Zeroizing<...>`
-                    // (the `crypto::seal` parameter type).
-                    let aad = format!("{}:{}", name, next_version);
-                    let (ciphertext, nonce) =
-                        crypto::seal(&plaintext, &key, &aad)?;
+                // Encrypt under the master key with the
+                // AAD bound to (name, version). A row-
+                // swap attack (replacing one secret's
+                // ciphertext with another's) cannot
+                // succeed because the AAD changes. The
+                // `&self.key` here is `&Arc<Zeroizing<...>>`
+                // and deref-coerces to `&Zeroizing<...>`
+                // (the `crypto::seal` parameter type).
+                let aad = format!("{}:{}", name, next_version);
+                let (ciphertext, nonce) = crypto::seal(&plaintext, &key, &aad)?;
 
-                    // Compute the SHA-256 of the plaintext
-                    // (lowercase hex, 64 ASCII bytes) and
-                    // store it in the `sha256` column. The
-                    // `lookup_hash` method reads this
-                    // column to constant-time-compare
-                    // against the incoming hash. The hex
-                    // form (not raw bytes) means the
-                    // constant-time compare can
-                    // short-circuit on length without a
-                    // second decode, and the on-disk
-                    // column is readable via a plain
-                    // `sqlite3` CLI for debugging
-                    // (without re-deriving the hash from
-                    // a binary blob).
-                    let mut hasher = Sha256::new();
-                    hasher.update(&plaintext);
-                    let sha256_hex = format!("{:x}", hasher.finalize());
+                // Compute the SHA-256 of the plaintext
+                // (lowercase hex, 64 ASCII bytes) and
+                // store it in the `sha256` column. The
+                // `lookup_hash` method reads this
+                // column to constant-time-compare
+                // against the incoming hash. The hex
+                // form (not raw bytes) means the
+                // constant-time compare can
+                // short-circuit on length without a
+                // second decode, and the on-disk
+                // column is readable via a plain
+                // `sqlite3` CLI for debugging
+                // (without re-deriving the hash from
+                // a binary blob).
+                let mut hasher = Sha256::new();
+                hasher.update(&plaintext);
+                let sha256_hex = format!("{:x}", hasher.finalize());
 
-                    let timestamp = events::now();
-                    tx.execute(
-                        "INSERT INTO sealed_secrets \
+                let timestamp = events::now();
+                tx.execute(
+                    "INSERT INTO sealed_secrets \
                          (name, version, status, nonce, ciphertext, sha256, created_at) \
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        rusqlite::params![
-                            name,
-                            next_version,
-                            STATUS_ACTIVE,
-                            &nonce[..],
-                            &ciphertext,
-                            sha256_hex.as_bytes(),
-                            timestamp.to_rfc3339(),
-                        ],
-                    )?;
-                    tx.commit()?;
-                    Ok::<_, SecurityError>((next_version, timestamp))
-                })
-            },
-        )
+                    rusqlite::params![
+                        name,
+                        next_version,
+                        STATUS_ACTIVE,
+                        &nonce[..],
+                        &ciphertext,
+                        sha256_hex.as_bytes(),
+                        timestamp.to_rfc3339(),
+                    ],
+                )?;
+                tx.commit()?;
+                Ok::<_, SecurityError>((next_version, timestamp))
+            })
+        })
         .await
         .map_err(|e| match e {
             afa_storage::StorageError::Closure(boxed) => boxed.into(),
@@ -381,9 +378,8 @@ impl SecurityV1 for SecurityEngine {
         // note on `seal` and `lookup_hash`).
         let name = secret_ref.name.clone();
         let version = secret_ref.version;
-        let row: Option<(Vec<u8>, Vec<u8>, String)> = afa_storage::with_conn(
-            &self.storage,
-            |conn| {
+        let row: Option<(Vec<u8>, Vec<u8>, String)> =
+            afa_storage::with_conn(&self.storage, |conn| {
                 Box::pin(async move {
                     conn.query_row(
                         "SELECT ciphertext, nonce, status FROM sealed_secrets \
@@ -400,13 +396,12 @@ impl SecurityV1 for SecurityEngine {
                     .optional()
                     .map_err(|_| SecurityError::StorageCorrupted)
                 })
-            },
-        )
-        .await
-        .map_err(|e| match e {
-            afa_storage::StorageError::Closure(boxed) => boxed.into(),
-            _ => SecurityError::StorageCorrupted,
-        })?;
+            })
+            .await
+            .map_err(|e| match e {
+                afa_storage::StorageError::Closure(boxed) => boxed.into(),
+                _ => SecurityError::StorageCorrupted,
+            })?;
 
         let (ciphertext, nonce, status) = row.ok_or_else(|| SecurityError::SecretNotFound {
             name: secret_ref.name.clone(),
@@ -533,86 +528,74 @@ impl SecurityV1 for SecurityEngine {
         // the transaction as `BEGIN IMMEDIATE`, which
         // prevents two parallel rotates from picking
         // the same new version.
-        let (new_version, timestamp) = afa_storage::with_conn(
-            &self.storage,
-            |conn| {
-                Box::pin(async move {
-                    let tx = conn
-                        .transaction_with_behavior(TransactionBehavior::Immediate)?;
-                    let new_version: u32 = tx
-                        .query_row(
-                            "SELECT COALESCE(MAX(version), 0) + 1 FROM sealed_secrets WHERE name = ?1",
-                            rusqlite::params![name],
-                            |row| row.get(0),
-                        )?;
+        let (new_version, timestamp) = afa_storage::with_conn(&self.storage, |conn| {
+            Box::pin(async move {
+                let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                let new_version: u32 = tx.query_row(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM sealed_secrets WHERE name = ?1",
+                    rusqlite::params![name],
+                    |row| row.get(0),
+                )?;
 
-                    // Encrypt the new plaintext with AAD
-                    // bound to (name, new_version). The
-                    // AAD differs from the old row's AAD
-                    // (which used old_version), so the
-                    // AEAD tag check is the only thing
-                    // that prevents an old-row / new-row
-                    // ciphertext confusion attack.
-                    let aad = format!("{}:{}", name, new_version);
-                    let (new_ciphertext, new_nonce) =
-                        crypto::seal(&new_plaintext, &key, &aad)?;
+                // Encrypt the new plaintext with AAD
+                // bound to (name, new_version). The
+                // AAD differs from the old row's AAD
+                // (which used old_version), so the
+                // AEAD tag check is the only thing
+                // that prevents an old-row / new-row
+                // ciphertext confusion attack.
+                let aad = format!("{}:{}", name, new_version);
+                let (new_ciphertext, new_nonce) = crypto::seal(&new_plaintext, &key, &aad)?;
 
-                    // Same SHA-256 of the plaintext as
-                    // `seal` (see that function for the
-                    // rationale on hex form). The hash
-                    // is for the *new* plaintext — the
-                    // old row's hash stays put, but the
-                    // `lookup_hash` method filters on
-                    // `status = 'active'`, so the old
-                    // row's hash is unreachable.
-                    let mut hasher = Sha256::new();
-                    hasher.update(&new_plaintext);
-                    let sha256_hex = format!("{:x}", hasher.finalize());
+                // Same SHA-256 of the plaintext as
+                // `seal` (see that function for the
+                // rationale on hex form). The hash
+                // is for the *new* plaintext — the
+                // old row's hash stays put, but the
+                // `lookup_hash` method filters on
+                // `status = 'active'`, so the old
+                // row's hash is unreachable.
+                let mut hasher = Sha256::new();
+                hasher.update(&new_plaintext);
+                let sha256_hex = format!("{:x}", hasher.finalize());
 
-                    // Mark the old row as `rotated` AND
-                    // insert the new active row inside the
-                    // same transaction. The 0-row-update
-                    // branch detects the concurrent-rotate
-                    // race surface (a parallel rotate
-                    // flipped the old row's status between
-                    // our pre-check and this UPDATE).
-                    let timestamp = events::now();
-                    let updated = tx
-                        .execute(
-                            "UPDATE sealed_secrets SET status = ?1 \
+                // Mark the old row as `rotated` AND
+                // insert the new active row inside the
+                // same transaction. The 0-row-update
+                // branch detects the concurrent-rotate
+                // race surface (a parallel rotate
+                // flipped the old row's status between
+                // our pre-check and this UPDATE).
+                let timestamp = events::now();
+                let updated = tx.execute(
+                    "UPDATE sealed_secrets SET status = ?1 \
                              WHERE name = ?2 AND version = ?3 AND status = ?4",
-                            rusqlite::params![
-                                STATUS_ROTATED,
-                                name,
-                                old_version,
-                                STATUS_ACTIVE
-                            ],
-                        )?;
-                    if updated != 1 {
-                        return Err(SecurityError::SecretRotated {
-                            name: name.clone(),
-                            version: old_version,
-                        });
-                    }
-                    tx.execute(
-                        "INSERT INTO sealed_secrets \
+                    rusqlite::params![STATUS_ROTATED, name, old_version, STATUS_ACTIVE],
+                )?;
+                if updated != 1 {
+                    return Err(SecurityError::SecretRotated {
+                        name: name.clone(),
+                        version: old_version,
+                    });
+                }
+                tx.execute(
+                    "INSERT INTO sealed_secrets \
                          (name, version, status, nonce, ciphertext, sha256, created_at) \
                          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                        rusqlite::params![
-                            name,
-                            new_version,
-                            STATUS_ACTIVE,
-                            &new_nonce[..],
-                            &new_ciphertext,
-                            sha256_hex.as_bytes(),
-                            timestamp.to_rfc3339(),
-                        ],
-                    )?;
-                    tx.commit()?;
-                    Ok::<_, SecurityError>((new_version, timestamp))
-                })
-            },
-        )
+                    rusqlite::params![
+                        name,
+                        new_version,
+                        STATUS_ACTIVE,
+                        &new_nonce[..],
+                        &new_ciphertext,
+                        sha256_hex.as_bytes(),
+                        timestamp.to_rfc3339(),
+                    ],
+                )?;
+                tx.commit()?;
+                Ok::<_, SecurityError>((new_version, timestamp))
+            })
+        })
         .await
         .map_err(|e| match e {
             afa_storage::StorageError::Closure(boxed) => boxed.into(),
@@ -730,43 +713,39 @@ impl SecurityV1 for SecurityEngine {
         // always valid UTF-8 since it is
         // `[0-9a-f]{64}`; a non-UTF-8 value is
         // a `StorageCorrupted`).
-        let stored_hash: Option<String> = afa_storage::with_conn(
-            &self.storage,
-            |conn| {
-                Box::pin(async move {
-                    conn.query_row(
-                        "SELECT sha256 FROM sealed_secrets \
+        let stored_hash: Option<String> = afa_storage::with_conn(&self.storage, |conn| {
+            Box::pin(async move {
+                conn.query_row(
+                    "SELECT sha256 FROM sealed_secrets \
                          WHERE name = ?1 AND status = ?2",
-                        rusqlite::params![name, STATUS_ACTIVE],
-                        |row| row.get::<_, Option<Vec<u8>>>(0),
-                    )
-                    .optional()
-                    .map_err(|_| SecurityError::StorageCorrupted)
-                    .and_then(|opt| {
-                        // Flatten `Option<Option<Vec<u8>>>` to
-                        // `Option<Vec<u8>>` (None for either
-                        // "no row" or "row but NULL column").
-                        opt.flatten()
-                            // Convert bytes to String (the
-                            // stored hex is always valid
-                            // UTF-8; a non-UTF-8 value means
-                            // the row was tampered with).
-                            .map(|bytes| {
-                                String::from_utf8(bytes)
-                                    .map_err(|_| SecurityError::StorageCorrupted)
-                            })
-                            .transpose()
-                    })
+                    rusqlite::params![name, STATUS_ACTIVE],
+                    |row| row.get::<_, Option<Vec<u8>>>(0),
+                )
+                .optional()
+                .map_err(|_| SecurityError::StorageCorrupted)
+                .and_then(|opt| {
+                    // Flatten `Option<Option<Vec<u8>>>` to
+                    // `Option<Vec<u8>>` (None for either
+                    // "no row" or "row but NULL column").
+                    opt.flatten()
+                        // Convert bytes to String (the
+                        // stored hex is always valid
+                        // UTF-8; a non-UTF-8 value means
+                        // the row was tampered with).
+                        .map(|bytes| {
+                            String::from_utf8(bytes).map_err(|_| SecurityError::StorageCorrupted)
+                        })
+                        .transpose()
                 })
-            },
-        )
+            })
+        })
         .await
         .map_err(|e| match e {
             afa_storage::StorageError::Closure(boxed) => boxed.into(),
             _ => SecurityError::StorageCorrupted,
         })?;
 
-        let stored = stored_hash.ok_or_else(|| SecurityError::SecretNotFound {
+        let stored = stored_hash.ok_or(SecurityError::SecretNotFound {
             name: name_for_err,
             version: 0, // placeholder — see the doc comment
         })?;

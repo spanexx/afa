@@ -131,7 +131,9 @@ where
     // by the caller — inside `with_conn`, the
     // borrow is to the local `guard`, with
     // lifetime equal to the function body).
-    F: for<'a> FnOnce(&'a mut Connection) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>,
+    F: for<'a> FnOnce(
+        &'a mut Connection,
+    ) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send + 'a>>,
     // The closure's error type `E` is anything
     // that converts to `StorageError`. The most
     // common case is `E = rusqlite::Error` (the

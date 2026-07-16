@@ -90,7 +90,18 @@ pub struct Storage {
     /// callers and `migrate` can `lock().await` for
     /// boot-time callers (see `migrate::migrate` for the
     /// rationale on the lock variant).
-    pub(crate) inner: Arc<Mutex<Connection>>,
+    ///
+    /// **Visible-by-design for test seams**: the
+    /// `from_connection_for_test` constructor in this
+    /// module wraps a fresh `Connection` (e.g. an
+    /// in-memory one for unit tests, or one whose file
+    /// has been chmod 000'd after open). Production
+    /// callers should use `open` (which both opens the
+    /// file AND creates the wrapping Storage in one
+    /// step); the field is left visible so the test
+    /// constructor can be a one-liner instead of a
+    /// 100-line clone of `open`.
+    pub inner: Arc<Mutex<Connection>>,
     /// The on-disk path the connection was opened on.
     /// Stored for diagnostic logging (the migration
     /// trace logs "applied migration N to {path}") and
@@ -123,6 +134,43 @@ pub use with_conn::with_conn;
 // `use afa_storage::StorageError;` and never have to
 // know the type's contract-crate address.
 pub use afa_contracts::StorageError;
+
+// CID:afa-storage-lib-006 - from_connection_for_test
+// Purpose: Build a `Storage` from a fresh
+// `rusqlite::Connection` + path, for the
+// afa-observability integration tests'
+// fault-injection setup (the test pre-opens a
+// connection, chmods the file to deny
+// subsequent writes, and hands the open
+// connection to the engine so the engine's
+// INSERTs hit a write-denied file). Without
+// this constructor, the test would have to
+// clone `open`'s body, which ties the test to
+// the open path's internal details.
+//
+// **Why this exists**: production callers use
+// `open()` which both opens the file AND
+// returns the wrapped `Storage`. Tests need to
+// open with file-level state that `open()` does
+// not expose (e.g. open-then-chmod-then-wrap)
+// for the write-failure tests in
+// afa-observability. `from_connection_for_test`
+// is that seam.
+//
+// **Public-API reasoning**: the `inner` field
+// is `pub` (visible-by-design for this
+// constructor); the constructor itself is
+// non-`unsafe` and a one-line `Arc::new(Mutex::new(conn))`
+// + `path` builder. No runtime cost over `open()`.
+//
+// **Used by**: crates/afa-observability/tests/observability_v1_tracing.rs
+// (the write-failure test series).
+pub fn from_connection_for_test(conn: Connection, path: PathBuf) -> Storage {
+    Storage {
+        inner: Arc::new(Mutex::new(conn)),
+        path,
+    }
+}
 
 // The three sibling modules — each holds one of the
 // three locked methods. Kept as separate files so the

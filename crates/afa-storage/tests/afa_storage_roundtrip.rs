@@ -182,8 +182,7 @@ async fn migrate_rolls_back_failed_migration() {
     // transaction semantic).
     let rows: Vec<u32> = with_conn(&storage, |conn| {
         Box::pin(async move {
-            let mut stmt =
-                conn.prepare("SELECT version FROM _afa_migrations ORDER BY version")?;
+            let mut stmt = conn.prepare("SELECT version FROM _afa_migrations ORDER BY version")?;
             let versions: rusqlite::Result<Vec<u32>> =
                 stmt.query_map([], |row| row.get(0))?.collect();
             versions

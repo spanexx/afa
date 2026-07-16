@@ -34,9 +34,7 @@ use crate::capability_registry::{CapabilityRegistry, RegisterError};
 use crate::event_bus::{EventBus, EventBusHandle};
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
-use afa_contracts::{
-    EmbeddingV1, KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1, StorageError,
-};
+use afa_contracts::{EmbeddingV1, KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1, StorageError};
 use afa_security::{open_storage, MasterKey, SecurityEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -113,7 +111,10 @@ impl Kernel {
     /// SQLite file). The caller (an `axum` bootstrap
     /// handler or a CLI `afa kernel start` command) is
     /// expected to log the error and refuse to start.
-    pub async fn new(master_key: &MasterKey, secrets_db_path: PathBuf) -> Result<Self, SecurityErrorV1> {
+    pub async fn new(
+        master_key: &MasterKey,
+        secrets_db_path: PathBuf,
+    ) -> Result<Self, SecurityErrorV1> {
         // Step 1: open or create the SQLite file. The
         // `open_storage` helper (in `afa-security`)
         // wraps the three boot steps (open,
@@ -127,34 +128,32 @@ impl Kernel {
         // extracted the storage into
         // `afa-storage`, which is `async` (the
         // lock is a `tokio::sync::Mutex`).
-        let storage = open_storage(&secrets_db_path)
-            .await
-            .map_err(|e| match e {
-                StorageError::Open(io) => SecurityErrorV1::StorageUnreachable {
-                    reason: format!("{}: {}", secrets_db_path.to_string_lossy(), io),
-                },
-                StorageError::Migrate { version, .. } => {
-                    // The engine's `SCHEMA_VERSION` is
-                    // the source of truth for the
-                    // "expected" field. Hardcoding `1`
-                    // here would mean the kernel
-                    // panics with the wrong number on
-                    // Phase 0.5b (which bumped the
-                    // engine to v2) and on every
-                    // future schema bump.
-                    SecurityErrorV1::SchemaVersionMismatch {
-                        found: version,
-                        expected: afa_security::SCHEMA_VERSION,
-                    }
+        let storage = open_storage(&secrets_db_path).await.map_err(|e| match e {
+            StorageError::Open(io) => SecurityErrorV1::StorageUnreachable {
+                reason: format!("{}: {}", secrets_db_path.to_string_lossy(), io),
+            },
+            StorageError::Migrate { version, .. } => {
+                // The engine's `SCHEMA_VERSION` is
+                // the source of truth for the
+                // "expected" field. Hardcoding `1`
+                // here would mean the kernel
+                // panics with the wrong number on
+                // Phase 0.5b (which bumped the
+                // engine to v2) and on every
+                // future schema bump.
+                SecurityErrorV1::SchemaVersionMismatch {
+                    found: version,
+                    expected: afa_security::SCHEMA_VERSION,
                 }
-                StorageError::Locked => SecurityErrorV1::StorageUnreachable {
-                    reason: format!(
-                        "{}: secrets.db is locked by another process",
-                        secrets_db_path.to_string_lossy()
-                    ),
-                },
-                StorageError::Closure(boxed) => boxed.into(),
-            })?;
+            }
+            StorageError::Locked => SecurityErrorV1::StorageUnreachable {
+                reason: format!(
+                    "{}: secrets.db is locked by another process",
+                    secrets_db_path.to_string_lossy()
+                ),
+            },
+            StorageError::Closure(boxed) => boxed.into(),
+        })?;
 
         // Step 2: build the shared bus (every adapter
         // sees the same one), and the `Runtime` /

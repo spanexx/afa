@@ -1,0 +1,62 @@
+[package]
+name = "afa-observability"
+version = "0.1.0"
+edition = "2021"
+description = "The v1 observability surface for the AFA kernel: the spans table (one row per dispatched operation), the tracing wrapper helper, the audit events (SpansWriteFailed / SpansPurged / SpansPurgeFailed), and the retention purge task. Lives in isolation in Phase 1 (no kernel wiring); Phase 2 wires the wrapper helper into the kernel's dispatch path."
+license = "Apache-2.0"
+
+[dependencies]
+# The two crate-internal deps: `afa-contracts` for the
+# SpanRecord / SpanOutcome / HealthCheck / AfaError shapes
+# and `afa-storage` for the shared SQLite plumbing.
+afa-contracts = { path = "../afa-contracts" }
+afa-storage = { path = "../afa-storage" }
+# In-process pub/sub used to publish `SpanRecord`,
+# `SpansWriteFailed`, `SpansPurged`, `SpansPurgeFailed`
+# events. Matches the dependency direction
+# (`afa-contracts` does not depend on `afa-bus`; the
+# engine crates do).
+afa-bus = { path = "../afa-bus" }
+
+# `rusqlite` direct dep (we use `rusqlite::Error`
+# in the local `ObservabilityError::StorageOp`
+# variant and `rusqlite::params!` in the
+# `persistence::write_span` body). Match the
+# version `afa-storage` already uses.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# `tokio` with `full` so the engine can `.await` from
+# any context (a future actor runtime, the kernel's
+# tokio main, a stream worker, etc.).
+tokio = { version = "1", features = ["full"] }
+
+# `tracing` for the structured log lines; the
+# `tracing-subscriber` is forward-looking (a future
+# pack wires the JSON formatter into the kernel's main).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serde for the JSON wire form of `SpanRecord` and
+# the audit events; `serde_json` is the explicit
+# dep so we never accidentally pull two versions.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# `uuid` for the `SpanRecord::span_id` (the wrapper
+# helper generates a fresh UUID per call). Pinned to
+# the same version the rest of the workspace resolves
+# to.
+uuid = { version = "1.23.4", features = ["v4", "serde"] }
+
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+# Generic error/anyhow plumbing.
+anyhow = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# `tempfile::tempdir()` is the standard per-test
+# scratch-directory helper (each test builds a fresh
+# spans DB file under a fresh tempdir).
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["full", "test-util"] }
