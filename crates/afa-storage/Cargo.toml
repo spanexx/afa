@@ -1,0 +1,37 @@
+[package]
+name = "afa-storage"
+version = "0.1.0"
+edition = "2021"
+description = "The shared SQLite-backed storage crate. Wraps `rusqlite::Connection` behind a `tokio::sync::Mutex` so every engine in the kernel can hand the same connection across `await` points without `unsafe`. Exposes `open`, `migrate`, and `with_conn` as the three locked methods. The schema-migration story lives here so each engine ships its own `&[Migration]` and the storage layer applies them idempotently."
+license = "Apache-2.0"
+
+[dependencies]
+# The two-locked-crime duo: the SQL dialect and the
+# async runtime. `rusqlite`'s `bundled` feature
+# removes any host-SQLite version concern (no
+# system `libsqlite3` needed at build or run time).
+# `tokio` with `full` so the engine can call
+# `with_conn` from any async context (a future
+# actor runtime, the kernel's tokio main, a
+# stream worker, etc.).
+afa-contracts = { path = "../afa-contracts" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio = { version = "1", features = ["sync"] }
+# `migrate` stamps `applied_at` on every applied
+# migration in the `_afa_migrations` table. The
+# `clock` feature enables `Utc::now()`; the
+# `serde` feature is forward-looking (a future
+# pack may add a `Snapshot` endpoint that returns
+# the migration history as JSON).
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+tracing = "0.1"
+
+[dev-dependencies]
+# `tempfile::tempdir()` is the standard
+# per-test scratch-directory helper. The five
+# roundtrip tests in `tests/afa_storage_roundtrip.rs`
+# each build a fresh `Storage` under a fresh
+# tempdir so the `_afa_migrations` table starts
+# empty.
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros", "sync"] }

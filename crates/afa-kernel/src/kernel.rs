@@ -34,8 +34,10 @@ use crate::capability_registry::{CapabilityRegistry, RegisterError};
 use crate::event_bus::{EventBus, EventBusHandle};
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
-use afa_contracts::{EmbeddingV1, KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1};
-use afa_security::{MasterKey, SealedSecretStore, SecurityEngine};
+use afa_contracts::{
+    EmbeddingV1, KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1, StorageError,
+};
+use afa_security::{open_storage, MasterKey, SecurityEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -86,8 +88,16 @@ impl Kernel {
     /// Steps:
     /// 1. Open or create the `secrets.db` SQLite file
     ///    at `secrets_db_path` (via
-    ///    `SealedSecretStore::open_or_create`, which runs
-    ///    the idempotent schema on first boot).
+    ///    `open_storage`, which runs the
+    ///    idempotent schema on first boot, then
+    ///    checks the schema version). The
+    ///    `open_storage` is `async` because the
+    ///    underlying `afa_storage::open` and
+    ///    `afa_storage::migrate` are async (the
+    ///    lock is a `tokio::sync::Mutex`, not a
+    ///    `std::sync::Mutex` — see the Phase 0.5a
+    ///    doc-drift correction #1 in
+    ///    `docs/contracts-foundation/IMPL-observability-baseline.md`).
     /// 2. Build the `SecurityEngine` over the store and
     ///    the kernel's `Arc<EventBus>`.
     /// 3. Wire the `Runtime` over the `Scheduler` and
@@ -103,13 +113,48 @@ impl Kernel {
     /// SQLite file). The caller (an `axum` bootstrap
     /// handler or a CLI `afa kernel start` command) is
     /// expected to log the error and refuse to start.
-    pub fn new(master_key: &MasterKey, secrets_db_path: PathBuf) -> Result<Self, SecurityErrorV1> {
+    pub async fn new(master_key: &MasterKey, secrets_db_path: PathBuf) -> Result<Self, SecurityErrorV1> {
         // Step 1: open or create the SQLite file. The
-        // `open_or_create` call runs the idempotent
-        // schema on first boot (a fresh file gets the
-        // `sealed_secrets` table; an existing file is
-        // left untouched).
-        let store = SealedSecretStore::open_or_create(&secrets_db_path)?;
+        // `open_storage` helper (in `afa-security`)
+        // wraps the three boot steps (open,
+        // migrate, check) into one call so the
+        // kernel doesn't have to know about the
+        // migration constant. **Doc drift
+        // correction #7 vs. the IMPL draft**:
+        // the IMPL said `Kernel::new` stays sync
+        // and uses a `SealedSecretStore::open_or_create`
+        // call, but the Phase 0.5a refactor
+        // extracted the storage into
+        // `afa-storage`, which is `async` (the
+        // lock is a `tokio::sync::Mutex`).
+        let storage = open_storage(&secrets_db_path)
+            .await
+            .map_err(|e| match e {
+                StorageError::Open(io) => SecurityErrorV1::StorageUnreachable {
+                    reason: format!("{}: {}", secrets_db_path.to_string_lossy(), io),
+                },
+                StorageError::Migrate { version, .. } => {
+                    // The engine's `SCHEMA_VERSION` is
+                    // the source of truth for the
+                    // "expected" field. Hardcoding `1`
+                    // here would mean the kernel
+                    // panics with the wrong number on
+                    // Phase 0.5b (which bumped the
+                    // engine to v2) and on every
+                    // future schema bump.
+                    SecurityErrorV1::SchemaVersionMismatch {
+                        found: version,
+                        expected: afa_security::SCHEMA_VERSION,
+                    }
+                }
+                StorageError::Locked => SecurityErrorV1::StorageUnreachable {
+                    reason: format!(
+                        "{}: secrets.db is locked by another process",
+                        secrets_db_path.to_string_lossy()
+                    ),
+                },
+                StorageError::Closure(boxed) => boxed.into(),
+            })?;
 
         // Step 2: build the shared bus (every adapter
         // sees the same one), and the `Runtime` /
@@ -122,7 +167,7 @@ impl Kernel {
         // so the kernel's own bus handle and the
         // engine's bus handle point at the same
         // underlying bus.
-        let engine = SecurityEngine::new(master_key, store, Arc::clone(&event_bus));
+        let engine = SecurityEngine::new(master_key, storage, Arc::clone(&event_bus));
         // Upcast to the trait object so the kernel's
         // public `security()` accessor hands out the
         // locked `SecurityV1` view, not the concrete
@@ -396,6 +441,7 @@ mod tests {
     use crate::runtime::EventReceived;
     use afa_contracts::{Actor, AfaEvent, TenantId};
     use afa_security::MasterKey;
+    use rusqlite::Connection;
     use serde::{Deserialize, Serialize};
     use tempfile::TempDir;
 
@@ -407,11 +453,11 @@ mod tests {
     /// would delete the file, which would race with
     /// the engine's open connection on slow
     /// filesystems).
-    fn fresh_kernel() -> (TempDir, Kernel) {
+    async fn fresh_kernel() -> (TempDir, Kernel) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("secrets.db");
         let key = MasterKey::from([0x42u8; 32]);
-        let kernel = Kernel::new(&key, path).expect("kernel::new");
+        let kernel = Kernel::new(&key, path).await.expect("kernel::new");
         (dir, kernel)
     }
 
@@ -429,7 +475,7 @@ mod tests {
         // `EventReceived` audit-trail fact. If
         // `Kernel::new` wired the components
         // incorrectly, this would fail.
-        let (_dir, kernel) = fresh_kernel();
+        let (_dir, kernel) = fresh_kernel().await;
         let bus = kernel.event_bus();
         let mut received = bus.subscribe::<EventReceived>(16);
 
@@ -456,7 +502,7 @@ mod tests {
         // shared. We check this by pointing the
         // `Arc`s at the same registry entry and
         // confirming both see the same steps.
-        let (_dir, kernel) = fresh_kernel();
+        let (_dir, kernel) = fresh_kernel().await;
         let scheduler_a = kernel.scheduler();
         let scheduler_b = kernel.scheduler();
         let bus_a = kernel.event_bus();
@@ -482,7 +528,7 @@ mod tests {
         // are visible to the clone, and events
         // published on one side land in subscriptions
         // made on the other.
-        let (_dir, original) = fresh_kernel();
+        let (_dir, original) = fresh_kernel().await;
         let clone = original.clone();
 
         // Register a step on the original's
@@ -541,7 +587,7 @@ mod tests {
         // the original is unsealable from the
         // clone, which proves the engine is shared
         // (not re-built per call).
-        let (_dir, kernel) = fresh_kernel();
+        let (_dir, kernel) = fresh_kernel().await;
         let clone = kernel.clone();
 
         // Seal a secret on the original's engine.
@@ -560,6 +606,133 @@ mod tests {
             .expect("unseal should succeed on a clone");
 
         assert_eq!(&*unsealed, b"hello-engine");
+    }
+
+    // ---- The two Phase-0.5b boot-failure-wrapping tests ----
+    //
+    // These tests sit at the `Kernel::new` boundary and
+    // prove the kernel's `match` arm is the one that
+    // wraps the storage-layer `StorageError` into the
+    // domain-level `SecurityErrorV1` the dashboard and
+    // callers see. The lower-level storage tests
+    // (`crates/afa-security/tests/boot_failures.rs` e3
+    // and e7) cover the same cases against the
+    // `StorageError` directly; these tests cover the
+    // *wiring* (the kernel is the only caller of
+    // `open_storage` in production code, so if its
+    // match arm ever regresses, these tests catch it).
+
+    /// CID:kernel-002 - kernel_new_wraps_storage_mismatch_into_security_error_v1
+    /// Purpose: Confirms the `Kernel::new` boot path
+    /// maps a tampered `secrets.db` (wrong
+    /// `schema_version`) into the domain-level
+    /// `SecurityErrorV1::SchemaVersionMismatch { found,
+    /// expected }` (NOT a raw `StorageError`). This is
+    /// the "you restored an old secrets.db" footgun,
+    /// surfaced through the only path the operator
+    /// ever sees.
+    #[tokio::test]
+    async fn kernel_new_returns_schema_version_mismatch_for_wrong_schema_version() {
+        // Build a tempdir and pre-populate the
+        // secrets.db with the security table shape
+        // and a `schema_version = 99` row (a
+        // "future" version the current engine
+        // cannot read).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secrets.db");
+        {
+            let conn = Connection::open(&path).expect("open db");
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sealed_secrets (
+                    name        TEXT NOT NULL,
+                    version     INTEGER NOT NULL,
+                    status      TEXT NOT NULL,
+                    nonce       BLOB NOT NULL,
+                    ciphertext  BLOB NOT NULL,
+                    created_at  TEXT NOT NULL,
+                    PRIMARY KEY (name, version)
+                );
+                CREATE TABLE afa_security_meta (
+                    key   TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
+                INSERT INTO afa_security_meta (key, value)
+                    VALUES ('schema_version', '99');
+                "#,
+            )
+            .expect("create schema");
+        }
+
+        // `Kernel::new` must reject the tampered
+        // file with
+        // `SecurityErrorV1::SchemaVersionMismatch
+        // { found: 99, expected: 1 }`. The mapping
+        // from `StorageError::Migrate { version, .. }`
+        // to this domain-level variant is in the
+        // `match` arm at the top of `Kernel::new`.
+        let key = MasterKey::from([0x42u8; 32]);
+        let result = Kernel::new(&key, path).await;
+        match result {
+            Err(SecurityErrorV1::SchemaVersionMismatch { found, expected }) => {
+                assert_eq!(found, 99, "found must be the on-disk schema_version");
+                // The "expected" is the engine's
+                // `SCHEMA_VERSION` (currently `2` in
+                // Phase 0.5b; was `1` in Phase 0.5a).
+                // The test reads it from the engine
+                // rather than hardcoding, so the
+                // assertion survives future schema
+                // bumps without an edit.
+                assert_eq!(
+                    expected,
+                    afa_security::SCHEMA_VERSION,
+                    "expected must be the engine's SCHEMA_VERSION"
+                );
+            }
+            Err(other) => panic!("expected SchemaVersionMismatch, got {other:?}"),
+            Ok(_) => panic!("expected SchemaVersionMismatch, got Ok(kernel)"),
+        }
+    }
+
+    /// CID:kernel-003 - kernel_new_wraps_storage_open_error_into_security_error_v1
+    /// Purpose: Confirms the `Kernel::new` boot path
+    /// maps an unwritable parent directory (where
+    /// `open_storage` returns `StorageError::Open(io)`)
+    /// into the domain-level
+    /// `SecurityErrorV1::StorageUnreachable { reason }`.
+    /// The `reason` is non-empty (the dashboard
+    /// surfaces it verbatim as the "what to fix"
+    /// hint).
+    #[tokio::test]
+    async fn kernel_new_returns_storage_unreachable_for_unwritable_parent() {
+        // Build a parent that is a regular file,
+        // so any attempt to `mkdir` underneath it
+        // fails. This is portable across Linux
+        // and macOS; the `create_dir_all` call
+        // inside `afa_storage::open` will fail
+        // with `NotADirectory`, which the storage
+        // layer surfaces as `StorageError::Open(io)`
+        // and the kernel wraps as
+        // `StorageUnreachable { reason }`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"i am a file, not a directory").expect("write blocker");
+        let path = blocker.join("under-a-file/secrets.db");
+
+        let key = MasterKey::from([0x42u8; 32]);
+        let result = Kernel::new(&key, path).await;
+        match result {
+            Err(SecurityErrorV1::StorageUnreachable { reason }) => {
+                // The reason must be non-empty (the
+                // dashboard surfaces it verbatim
+                // as the "what to fix" hint). The
+                // exact wording is OS-dependent,
+                // so we only pin the non-emptiness.
+                assert!(!reason.is_empty());
+            }
+            Err(other) => panic!("expected StorageUnreachable, got {other:?}"),
+            Ok(_) => panic!("expected StorageUnreachable, got Ok(kernel)"),
+        }
     }
 }
 

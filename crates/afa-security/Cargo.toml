@@ -7,6 +7,14 @@ license = "Apache-2.0"
 
 [dependencies]
 afa-contracts = { path = "../afa-contracts" }
+# Phase 0.5a: the new shared SQLite wrapper. The
+# security engine now uses `afa_storage::Storage`
+# directly (no more `SealedSecretStore`); this
+# Cargo.toml adds `afa-storage` as a direct dep.
+# The `rusqlite` dep stays (the engine writes its
+# own SQL via `Storage::with_conn`, which hands
+# out a `&mut rusqlite::Connection`).
+afa-storage = { path = "../afa-storage" }
 # The in-process pub/sub bus — the security engine
 # publishes the three audit facts (`SecretSealed`,
 # `SecretUnsealed`, `SecretRotated`) on the kernel's
@@ -24,18 +32,28 @@ afa-bus = { path = "../afa-bus" }
 aes-gcm = "0.10"
 # Memory zeroing (TRD §3.2) — RustCrypto, opensrc-verified
 zeroize = "1"
-# SQLite (TRD §3.3) — bundled removes host SQLite version concern
+# SQLite (TRD §3.3) — bundled removes host SQLite version concern.
+# **Doc drift correction #6 vs. the IMPL draft**:
+# the IMPL said to remove this dep (since the
+# I/O is in `afa-storage`), but the engine still
+# needs the `rusqlite` types for its SQL
+# (`query_row`, `execute`, `Transaction`,
+# `TransactionBehavior`, `params!`).
 rusqlite = { version = "0.31", features = ["bundled"] }
-# Async runtime pieces (TRD §3.4) — `rt` not needed (we don't run a
-# runtime here), but `sync` is for the `Mutex<Connection>` guard
+# Async runtime pieces (TRD §3.4) — the
+# `tokio::sync::Mutex` in `afa_storage::Storage`
+# is a `tokio` mutex; the engine's `seal` /
+# `unseal` / `rotate` / `lookup_hash` methods
+# are `async fn` and `.await` the `with_conn`
+# future.
 tokio = { version = "1", features = ["sync", "macros"] }
 # Dyn-compatibility for `SecurityV1` (TRD §3.5)
 async-trait = "0.1"
-# Engine-only error derives are not needed; `SecurityErrorV1` lives in
+# Engine-only error derives are not needed; `SecurityError` lives in
 # `afa-contracts` (Phase 0). Listed here as a no-op (the derive is on
 # the contracts side) for documentation.
 # thiserror is intentionally NOT a dep — the engine has no error type
-# of its own; it re-exports `SecurityErrorV1`.
+# of its own; it re-exports `SecurityError`.
 # Tracing (TRD §3.7)
 tracing = "0.1"
 # Serde (TRD §3.8) — needed for the `SecretRef` and the event
@@ -43,7 +61,7 @@ tracing = "0.1"
 # `afa-contracts`.
 serde = { version = "1.0", features = ["derive"] }
 # Chrono (TRD §3.9) — used for the `created_at` column timestamps
-# in `SealedSecretStore` and for the event timestamps in Phase 2.
+# in `sealed_secrets` and for the event timestamps in Phase 2.
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 # Random nonce generation — used by `crypto::seal`. The `rand`
 # crate is re-exported by `aes-gcm`'s `aead` feature, so we list it
@@ -53,6 +71,13 @@ rand = "0.8"
 # (the env-var reader hands the env-var string straight to
 # `from_hex`, so the engine itself never holds the hex form).
 hex = "0.4"
+# SHA-256 (TRD §3.10) — used by `lookup_hash` and the
+# new `sha256` column the engine writes in `seal` /
+# `rotate` (Phase 0.5b). The hash is stored as a
+# lowercase hex string (64 chars), not raw bytes, so
+# the constant-time compare in `lookup_hash` can
+# short-circuit on length without a second decode.
+sha2 = "0.10"
 
 [dev-dependencies]
 # In-memory temp dirs for the SQLite file in tests.
@@ -60,7 +85,7 @@ tempfile = "3"
 # JSON serialization for the property tests in Phase 2.
 serde_json = "1"
 # `tokio::test` and friends for the async engine tests.
-tokio = { version = "1", features = ["rt", "sync", "macros", "time", "test-util"] }
+tokio = { version = "1", features = ["rt", "sync", "macros", "time", "test-util", "rt-multi-thread"] }
 # Mock HTTP server for the LLM-style integration test
 # (`tests/llm_integration.rs`). Used to stand up a
 # fake HTTP target that the security engine's

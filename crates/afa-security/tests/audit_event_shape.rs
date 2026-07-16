@@ -37,7 +37,7 @@ use tokio::time::timeout;
 
 #[tokio::test]
 async fn seal_publishes_a_secret_sealed_event_with_the_documented_fields() {
-    let (_dir, bus, engine) = common::new_engine_with_bus();
+    let (_dir, bus, engine) = common::new_engine_with_bus().await;
     let mut sealed_sub = bus.subscribe::<EngineSecretSealed>(8);
 
     let v1 = engine
@@ -71,7 +71,7 @@ async fn seal_publishes_a_secret_sealed_event_with_the_documented_fields() {
 
 #[tokio::test]
 async fn unseal_publishes_a_secret_unsealed_event_with_the_documented_fields() {
-    let (_dir, bus, engine) = common::new_engine_with_bus();
+    let (_dir, bus, engine) = common::new_engine_with_bus().await;
     let mut sealed_sub = bus.subscribe::<EngineSecretSealed>(8);
     let mut unsealed_sub = bus.subscribe::<EngineSecretUnsealed>(8);
 
@@ -122,7 +122,7 @@ async fn unseal_publishes_a_secret_unsealed_event_with_the_documented_fields() {
 
 #[tokio::test]
 async fn rotate_publishes_a_secret_rotated_event_with_both_versions() {
-    let (_dir, bus, engine) = common::new_engine_with_bus();
+    let (_dir, bus, engine) = common::new_engine_with_bus().await;
     let mut sealed_sub = bus.subscribe::<EngineSecretSealed>(8);
     let mut rotated_sub = bus.subscribe::<EngineSecretRotated>(8);
 
@@ -169,7 +169,7 @@ async fn no_event_carries_the_plaintext_or_the_master_key() {
     // match the contracts spec exactly, and the
     // plaintext bytes must not appear anywhere in
     // the serialized form.
-    let (_dir, bus, engine) = common::new_engine_with_bus();
+    let (_dir, bus, engine) = common::new_engine_with_bus().await;
     let mut sealed_sub = bus.subscribe::<EngineSecretSealed>(8);
     let mut unsealed_sub = bus.subscribe::<EngineSecretUnsealed>(8);
     let mut rotated_sub = bus.subscribe::<EngineSecretRotated>(8);
@@ -261,7 +261,7 @@ async fn full_lifecycle_seal_unseal_rotate_unseal_old_fails_unseal_new_succeeds(
     // ("we unsealed the openai key 47 times" must mean
     // 47 actual unseals, not 46 actual unseals plus 1
     // attempt).
-    let (_dir, bus, engine) = common::new_engine_with_bus();
+    let (_dir, bus, engine) = common::new_engine_with_bus().await;
     let mut sealed_sub = bus.subscribe::<EngineSecretSealed>(8);
     let mut unsealed_sub = bus.subscribe::<EngineSecretUnsealed>(8);
     let mut rotated_sub = bus.subscribe::<EngineSecretRotated>(8);

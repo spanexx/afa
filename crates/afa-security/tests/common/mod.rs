@@ -40,7 +40,7 @@
 
 use afa_bus::EventBus;
 use afa_contracts::{Actor, ExecutionContext, TenantId};
-use afa_security::storage::SealedSecretStore;
+use afa_security::open_storage;
 use afa_security::{MasterKey, SecurityEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -85,19 +85,21 @@ pub fn new_test_db_path() -> (TempDir, PathBuf) {
 
 // CID:afa-security-test-common-003 - new_engine_with_bus
 // Purpose: Build a fresh `SecurityEngine` wired to a
-// fresh `EventBus` and a fresh `SealedSecretStore`.
+// fresh `EventBus` and a fresh `Storage` (the
+// Phase-0.5a re-export of `afa_storage::Storage`,
+// formerly a `SealedSecretStore`).
 // The bus is also returned (as a separate
 // `Arc<EventBus>`) so the test can `subscribe()`
 // without reaching through the engine. The
 // `TempDir` is returned so the test can keep it
 // alive (see the doc comment on `new_test_db_path`).
-// Errors: propagates `open_or_create` failures (e.g.
+// Errors: propagates `open_storage` failures (e.g.
 // permission denied on the tempdir).
 // Used by: every test file in this crate.
-pub fn new_engine_with_bus() -> (TempDir, Arc<EventBus>, SecurityEngine) {
+pub async fn new_engine_with_bus() -> (TempDir, Arc<EventBus>, SecurityEngine) {
     let (dir, path) = new_test_db_path();
     let bus = Arc::new(EventBus::new());
-    let store = SealedSecretStore::open_or_create(&path).expect("open store");
+    let store = open_storage(&path).await.expect("open store");
     let engine = SecurityEngine::new(&test_key(), store, Arc::clone(&bus));
     (dir, bus, engine)
 }

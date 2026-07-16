@@ -121,7 +121,7 @@ async fn sixteen_parallel_rotates_get_distinct_versions() {
     // yields on `.await`, so 16 spawned tasks on
     // a single thread still hit the race
     // window.
-    let (_dir, _bus, engine) = common::new_engine_with_bus();
+    let (_dir, _bus, engine) = common::new_engine_with_bus().await;
     let engine = Arc::new(engine);
 
     // Seed: a single version-1 row for everyone to

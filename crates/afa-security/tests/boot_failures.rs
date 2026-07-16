@@ -52,8 +52,8 @@
 //!
 //! Quick lookup: rg -n "CID:afa-security-boot-" crates/afa-security/tests/boot_failures.rs
 
-use afa_contracts::SecurityErrorV1;
-use afa_security::{MasterKey, SealedSecretStore};
+use afa_contracts::{SecurityErrorV1, StorageError};
+use afa_security::{MasterKey, open_storage};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -297,7 +297,7 @@ fn e2_happy_path_returns_a_usable_master_key() {
 }
 
 // CID:afa-security-boot-005 - e3_returns_schema_version_mismatch_when_existing_file_has_wrong_version
-// Purpose: Confirms the `SealedSecretStore::open_or_create`
+// Purpose: Confirms the `open_storage`
 // boot path rejects an existing SQLite file
 // whose `schema_version` does not match the
 // version this engine supports. This is the
@@ -305,8 +305,27 @@ fn e2_happy_path_returns_a_usable_master_key() {
 // the engine must fail fast at boot with a
 // typed error rather than silently
 // misinterpreting the rows.
-#[test]
-fn e3_returns_schema_version_mismatch_when_existing_file_has_wrong_version() {
+//
+// **Surface note vs. pre-Phase-0.5a**: the
+// old `SealedSecretStore::open_or_create`
+// surfaced this as
+// `SecurityErrorV1::SchemaVersionMismatch`
+// directly. The Phase-0.5a refactor split the
+// boot into three steps in `afa-storage` /
+// `afa-security::storage::open_storage`; the
+// storage layer now returns
+// `StorageError::Migrate { version, .. }`
+// (the `version` field carries the
+// mismatched `schema_version` it found), and
+// the kernel's `Kernel::new` is the one that
+// wraps the `StorageError::Migrate` arm into
+// `SecurityErrorV1::SchemaVersionMismatch`
+// (see `crates/afa-kernel/src/kernel.rs`).
+// This test asserts the *storage* layer's
+// typed error; the kernel-layer wrapping
+// has its own test in `afa-kernel`.
+#[tokio::test]
+async fn e3_returns_schema_version_mismatch_when_existing_file_has_wrong_version() {
     // Build a fresh tempdir with a hand-crafted
     // `secrets.db` that has the right table
     // shape but the wrong `schema_version`.
@@ -315,7 +334,7 @@ fn e3_returns_schema_version_mismatch_when_existing_file_has_wrong_version() {
     {
         let conn = Connection::open(&db_path).expect("open db");
         // The schema is the same as
-        // `SealedSecretStore::open_or_create` would
+        // `open_storage` would
         // create, EXCEPT the `schema_version` row
         // is pre-populated with `99` (a "future"
         // version this engine cannot read).
@@ -340,62 +359,92 @@ fn e3_returns_schema_version_mismatch_when_existing_file_has_wrong_version() {
         )
         .expect("create schema");
     }
-    // The next call should reject the file with
-    // `SchemaVersionMismatch { found: 99,
-    // expected: 1 }` (the current engine's
-    // `SCHEMA_VERSION` is `1`).
-    let result = SealedSecretStore::open_or_create(&db_path);
+    // The next call should reject the file
+    // with `StorageError::Migrate { version:
+    // 99, .. }` (the `version` field carries
+    // the mismatched `schema_version` it
+    // read back from the tampered file). The
+    // kernel's `Kernel::new` wraps this into
+    // `SecurityErrorV1::SchemaVersionMismatch`;
+    // see the kernel-wrapping test in
+    // `crates/afa-kernel/src/kernel.rs`.
+    let result = open_storage(&db_path).await;
     match result {
-        Err(SecurityErrorV1::SchemaVersionMismatch { found, expected }) => {
-            assert_eq!(found, 99);
-            assert_eq!(expected, 1);
+        Err(StorageError::Migrate { version, .. }) => {
+            assert_eq!(
+                version, 99,
+                "the Migrate error must carry the on-disk schema_version it read back"
+            );
         }
-        Err(other) => panic!("expected SchemaVersionMismatch, got {other:?}"),
-        Ok(_) => panic!("expected SchemaVersionMismatch, got Ok(...)"),
+        Err(other) => panic!("expected StorageError::Migrate {{ version: 99, .. }}, got {other:?}"),
+        Ok(_) => panic!("expected StorageError::Migrate, got Ok(...)"),
     }
 }
 
 // CID:afa-security-boot-006 - e7_returns_storage_unreachable_when_parent_dir_cannot_be_created
-// Purpose: Confirms the `SealedSecretStore::open_or_create`
+// Purpose: Confirms the `open_storage`
 // boot path rejects a path whose parent
 // directory does not exist and cannot be
 // created (e.g. a read-only mount, a path
 // through a regular file as a directory
-// component). The operator sees a clear
-// `StorageUnreachable` error and the
-// dashboard surfaces the embedded
-// `reason` string.
-#[test]
-fn e7_returns_storage_unreachable_when_parent_dir_cannot_be_created() {
+// component). The caller (the kernel, not
+// the storage layer) is the one that maps
+// this to a domain-level `StorageUnreachable`
+// error; the storage layer surfaces
+// `StorageError::Open(io)` (with the
+// underlying `io::Error` carrying the
+// OS-level "not a directory" reason).
+//
+// **Surface note vs. pre-Phase-0.5a**: the
+// old `SealedSecretStore::open_or_create`
+// surfaced this as
+// `SecurityErrorV1::StorageUnreachable`
+// directly. The Phase-0.5a refactor split
+// the open into `afa_storage::open` (which
+// returns `StorageError::Open(io)`) and the
+// kernel is the one that wraps the
+// `StorageError::Open` arm into
+// `SecurityErrorV1::StorageUnreachable`
+// (see `crates/afa-kernel/src/kernel.rs`).
+// This test asserts the *storage* layer's
+// typed error; the kernel-layer wrapping
+// has its own test in `afa-kernel`.
+#[tokio::test]
+async fn e7_returns_storage_unreachable_when_parent_dir_cannot_be_created() {
     // Build a parent that is a regular file,
     // so any attempt to `mkdir` underneath it
     // fails. This is portable across Linux +
     // macOS (CI runs on Linux); the
     // `create_dir_all` call inside
-    // `SealedSecretStore::open_or_create`
+    // `afa_storage::open`
     // will fail with `NotADirectory`, which
-    // we wrap into `StorageUnreachable { ... }`.
+    // `open_storage` propagates as
+    // `StorageError::Open(io)`.
     let dir = tempfile::tempdir().expect("tempdir");
     let blocker = dir.path().join("blocker");
     std::fs::write(&blocker, b"i am a file, not a directory").expect("write blocker");
     let db_path: PathBuf = blocker.join("under-a-file/secrets.db");
 
-    let result = SealedSecretStore::open_or_create(&db_path);
+    let result = open_storage(&db_path).await;
     match result {
-        Err(SecurityErrorV1::StorageUnreachable { reason }) => {
-            // The reason must be non-empty (the
-            // dashboard surfaces it verbatim as
-            // the "what to fix" hint).
-            assert!(!reason.is_empty());
-            // The reason must mention either the
-            // parent dir or the underlying error.
-            // We don't pin the exact wording (the
-            // OS error string varies between
-            // Linux and macOS) — we just pin
-            // that it is *not* an empty string.
+        Err(StorageError::Open(io)) => {
+            // The underlying `io::Error` must
+            // carry a non-empty reason (the
+            // kernel wraps it into the
+            // `StorageUnreachable { reason }`
+            // string the dashboard surfaces
+            // verbatim as the "what to fix"
+            // hint). The exact `kind()` and
+            // OS error string vary between
+            // Linux and macOS, so we only
+            // pin the non-emptiness here.
+            assert!(
+                !io.to_string().is_empty(),
+                "underlying io::Error must carry a non-empty reason"
+            );
         }
-        Err(other) => panic!("expected StorageUnreachable, got {other:?}"),
-        Ok(_) => panic!("expected StorageUnreachable, got Ok(...)"),
+        Err(other) => panic!("expected StorageError::Open, got {other:?}"),
+        Ok(_) => panic!("expected StorageError::Open, got Ok(...)"),
     }
 }
 

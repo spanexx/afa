@@ -97,11 +97,11 @@ use tempfile::TempDir;
 /// the `TempDir` would delete the file, which
 /// would race with the engine's open connection
 /// on slow filesystems).
-fn fresh_kernel() -> (TempDir, Kernel) {
+async fn fresh_kernel() -> (TempDir, Kernel) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("secrets.db");
     let key = MasterKey::from([0x42u8; 32]);
-    let kernel = Kernel::new(&key, path).expect("kernel::new");
+    let kernel = Kernel::new(&key, path).await.expect("kernel::new");
     (dir, kernel)
 }
 
@@ -141,7 +141,7 @@ async fn kernel_end_to_end_store_then_find_round_trip() {
     // 1. Bring up a real Kernel (real
     //    SecurityEngine, real bus, real
     //    CapabilityRegistry).
-    let (_secrets_dir, kernel) = fresh_kernel();
+    let (_secrets_dir, kernel) = fresh_kernel().await;
     // 2. Bring up a real JsonKnowledgeAdapter
     //    against a fresh TempDir storage root.
     //    The adapter is wired to the kernel's
@@ -293,7 +293,7 @@ async fn kernel_end_to_end_list_topics_after_multi_topic_seed() {
     //    JsonKnowledgeAdapter against a fresh
     //    TempDir storage root, wired to the
     //    kernel's own bus.
-    let (_secrets_dir, kernel) = fresh_kernel();
+    let (_secrets_dir, kernel) = fresh_kernel().await;
     let knowledge_dir = TempDir::new().expect("tempdir for knowledge");
     let storage_root = knowledge_dir.path().to_path_buf();
     let bus: Arc<EventBus> = kernel.event_bus();
@@ -382,7 +382,7 @@ async fn kernel_register_knowledge_twice_returns_knowledge_already_registered() 
     // bootstrap fails loudly but cleanly. The
     // error carries the conflicting key for
     // the operator log.
-    let (_secrets_dir, kernel) = fresh_kernel();
+    let (_secrets_dir, kernel) = fresh_kernel().await;
     let dir_a = TempDir::new().expect("tempdir a");
     let dir_b = TempDir::new().expect("tempdir b");
     let bus: Arc<EventBus> = kernel.event_bus();
@@ -432,7 +432,7 @@ async fn kernel_knowledge_returns_none_before_registration() {
     // this tenant" error rather than a
     // confusing deref-of-None deep in the
     // call stack.
-    let (_secrets_dir, kernel) = fresh_kernel();
+    let (_secrets_dir, kernel) = fresh_kernel().await;
     assert!(
         kernel.knowledge("default").is_none(),
         "kernel.knowledge(\"default\") should return None before any register_knowledge call"
@@ -463,7 +463,7 @@ async fn kernel_knowledge_uses_kernel_event_bus_for_audit_events() {
     // private bus, the kernel's bus would see
     // no events and the test would time out
     // on the subscription `recv`.
-    let (_secrets_dir, kernel) = fresh_kernel();
+    let (_secrets_dir, kernel) = fresh_kernel().await;
     let knowledge_dir = TempDir::new().expect("tempdir for knowledge");
     let storage_root = knowledge_dir.path().to_path_buf();
     // Wire the adapter to the kernel's bus.

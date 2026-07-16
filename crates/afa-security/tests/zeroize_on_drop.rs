@@ -24,19 +24,19 @@
 //! assertion is on the user-visible type and the
 //! user-visible bytes.
 
-use afa_security::crypto;
+use afa_security::{open, seal};
 use zeroize::Zeroizing;
 
 #[test]
 fn engine_path_open_returns_zeroing_handle() {
-    // The engine path: `crypto::seal` then `crypto::open`
+    // The engine path: `seal` then `open`
     // returns a `Zeroizing<Vec<u8>>` whose bytes match
     // the sealed plaintext. The handle is dropped at the
     // end of the scope; reaching the end of this function
     // means the drop did not panic.
     let key: Zeroizing<[u8; 32]> = Zeroizing::new([0xA5u8; 32]);
-    let (ct, nonce) = crypto::seal(b"hello, zeroize world", &key, "name:1").expect("seal ok");
-    let pt: Zeroizing<Vec<u8>> = crypto::open(&ct, &nonce, &key, "name:1").expect("open ok");
+    let (ct, nonce) = seal(b"hello, zeroize world", &key, "name:1").expect("seal ok");
+    let pt: Zeroizing<Vec<u8>> = open(&ct, &nonce, &key, "name:1").expect("open ok");
 
     // The handle is a `Zeroizing<Vec<u8>>` (not a plain
     // `Vec<u8>`). The explicit type annotation on the
@@ -57,8 +57,8 @@ fn engine_path_unsealed_secret_contains_zeroing() {
     // that the `Deref<Target = [u8]>` impl lets the
     // caller read the bytes without copying.
     let key: Zeroizing<[u8; 32]> = Zeroizing::new([0xA5u8; 32]);
-    let (ct, nonce) = crypto::seal(b"abc", &key, "name:1").expect("seal ok");
-    let pt: Zeroizing<Vec<u8>> = crypto::open(&ct, &nonce, &key, "name:1").expect("open ok");
+    let (ct, nonce) = seal(b"abc", &key, "name:1").expect("seal ok");
+    let pt: Zeroizing<Vec<u8>> = open(&ct, &nonce, &key, "name:1").expect("open ok");
 
     // Read via `Deref<Target = [u8]>` — this is the
     // pattern every adapter uses (`&handle[..]`).

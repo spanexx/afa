@@ -24,6 +24,17 @@
 //!   (`EmbeddingErrorV1`), the capabilities card
 //!   (`EmbeddingCapabilitiesV1`), and the three audit
 //!   events. See `embedding/mod.rs` for the Code Map.
+//! - `observability`: The v1 observability contract: the
+//!   `SpanRecord` / `SpanOutcome` shape (the one row in the
+//!   spans table), the `HealthStatus` / `HealthReport`
+//!   shape (the per-engine health envelope), the three
+//!   audit events (`SpansWriteFailed` / `SpansPurged` /
+//!   `SpansPurgeFailed`), the `StorageError` and
+//!   `ObservabilityErrorV1` enums, and the `HealthCheck`
+//!   trait every engine implements. See
+//!   `observability.rs` for the Code Map.
+//! - `storage`: The `Migration` DTO the `afa-storage` crate
+//!   consumes at boot. See `storage.rs` for the Code Map.
 //!
 //! Story (plain English): This file is the front door of the
 //! shared types library. The other files in this folder hold the
@@ -43,6 +54,11 @@
 //! CID:afa-contracts-lib-005 -> llm
 //! CID:afa-contracts-lib-006 -> security
 //! CID:afa-contracts-lib-007 -> versioning_example
+//! CID:afa-contracts-lib-008 -> knowledge
+//! CID:afa-contracts-lib-009 -> bus types
+//! CID:afa-contracts-lib-010 -> embedding
+//! CID:afa-contracts-lib-011 -> observability
+//! CID:afa-contracts-lib-012 -> storage
 //!
 //! Quick lookup: rg -n "CID:afa-contracts-lib-" crates/afa-contracts/src/lib.rs
 
@@ -136,6 +152,30 @@ pub mod versioning_example;
 // and the conformance suite in `afa-contract-testing`.
 pub mod embedding;
 
+// CID:afa-contracts-lib-011 - observability
+// Purpose: Re-export the v1 Observability contract: the
+// `SpanRecord` / `SpanOutcome` / `HealthStatus` /
+// `HealthReport` types, the three audit events
+// (`SpansWriteFailed` / `SpansPurged` / `SpansPurgeFailed`),
+// the `StorageError` and `ObservabilityErrorV1` enums, and
+// the `HealthCheck` trait every engine implements. See
+// `observability.rs` for the Code Map.
+// Used by: the `afa-observability` engine (the writer of
+// spans and the publisher of the three audit events), every
+// engine's `HealthCheck` impl, the kernel's
+// `aggregate_health()` aggregator, and the dashboard's
+// `GET /health` and `/spans/*` handlers.
+pub mod observability;
+
+// CID:afa-contracts-lib-012 - storage
+// Purpose: Re-export the `Migration` DTO the `afa-storage`
+// crate consumes at boot. See `storage.rs` for the Code
+// Map. Used by: every engine that ships a SQLite schema
+// (`afa-security` for the `sealed_secrets` table,
+// `afa-observability` for the `spans` table, future
+// engines' tables).
+pub mod storage;
+
 pub use embedding::{
     EmbeddingCapabilitiesV1, EmbeddingCompleted, EmbeddingErrorKind, EmbeddingErrorV1,
     EmbeddingFailed, EmbeddingRequested, EmbeddingV1, EmbeddingV1Version,
@@ -150,8 +190,23 @@ pub use llm::{
     LlmErrorKind, LlmErrorV1, LlmV1, ModelCapabilities, SamplingParams, ToolCallRequest,
     ToolDefinition, Usage,
 };
+// CID:afa-contracts-lib-011 re-exports - observability
+// Flatten the observability module's most-used types to
+// the crate root so callers can write
+// `use afa_contracts::SpanRecord;` instead of
+// `use afa_contracts::observability::SpanRecord;`. The
+// `StorageError` re-export is the one the `afa-storage`
+// crate itself uses (`pub use afa_contracts::StorageError;`).
+pub use observability::{
+    HealthCheck, HealthReport, HealthStatus, ObservabilityErrorV1, SpanOutcome, SpanRecord,
+    SpansPurgeFailed, SpansPurged, SpansWriteFailed, StorageError,
+};
 pub use security::{
     SecretRef, SecretRotated, SecretSealed, SecretUnsealed, SecurityErrorV1, SecurityV1,
     UnsealedSecret,
 };
+// CID:afa-contracts-lib-012 re-exports - storage
+// Flatten the `Migration` DTO to the crate root so
+// `use afa_contracts::Migration;` works.
+pub use storage::Migration;
 pub use versioning_example::{ExampleThingImpl, ExampleThingV1, ExampleThingV2};

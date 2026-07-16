@@ -1,8 +1,8 @@
-//! Test: `SealedSecretStore::open_or_create` on a path that
+//! Test: `open_storage` on a path that
 //! does not exist creates the SQLite file, runs the
 //! idempotent schema, and records `schema_version = 1` in
 //! the `afa_security_meta` table. The next call to
-//! `open_or_create` on the same path is a no-op (the
+//! `open_storage` on the same path is a no-op (the
 //! schema `CREATE TABLE IF NOT EXISTS` and `INSERT OR
 //! IGNORE` are idempotent).
 //!
@@ -13,7 +13,8 @@
 //! is on the on-disk schema state (the file exists, the
 //! tables exist, the `schema_version` row is `1`).
 
-use afa_security::SealedSecretStore;
+use afa_contracts::StorageError;
+use afa_security::open_storage;
 use rusqlite::Connection;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -22,13 +23,13 @@ fn db_path(dir: &TempDir, name: &str) -> PathBuf {
     dir.path().join(name)
 }
 
-#[test]
-fn open_or_create_creates_file_and_schema() {
+#[tokio::test]
+async fn open_or_create_creates_file_and_schema() {
     let dir = TempDir::new().expect("tempdir");
     let path = db_path(&dir, "secrets.db");
     assert!(!path.exists(), "precondition: file should not exist");
 
-    let _store = SealedSecretStore::open_or_create(&path).expect("open_or_create ok");
+    let _store = open_storage(&path).await.expect("open_or_create ok");
 
     // File was created.
     assert!(path.exists(), "file should be created");
@@ -59,13 +60,13 @@ fn open_or_create_creates_file_and_schema() {
     assert_eq!(schema_version, "1", "schema_version should be 1");
 }
 
-#[test]
-fn open_or_create_is_idempotent() {
+#[tokio::test]
+async fn open_or_create_is_idempotent() {
     let dir = TempDir::new().expect("tempdir");
     let path = db_path(&dir, "secrets.db");
 
-    let _store1 = SealedSecretStore::open_or_create(&path).expect("first open ok");
-    let _store2 = SealedSecretStore::open_or_create(&path).expect("second open ok");
+    let _store1 = open_storage(&path).await.expect("first open ok");
+    let _store2 = open_storage(&path).await.expect("second open ok");
 
     // Schema is still the same; no duplicate-table errors.
     let conn = Connection::open(&path).expect("open");
@@ -79,8 +80,8 @@ fn open_or_create_is_idempotent() {
     assert_eq!(table_count, 2);
 }
 
-#[test]
-fn open_or_create_creates_parent_directories() {
+#[tokio::test]
+async fn open_or_create_creates_parent_directories() {
     let dir = TempDir::new().expect("tempdir");
     // Path has a parent that does not exist yet.
     let path = db_path(&dir, "nested/sub/dir/secrets.db");
@@ -89,18 +90,18 @@ fn open_or_create_creates_parent_directories() {
         "precondition: parent missing"
     );
 
-    let _store = SealedSecretStore::open_or_create(&path).expect("open_or_create creates parents");
+    let _store = open_storage(&path).await.expect("open_or_create creates parents");
 
     assert!(path.exists(), "file should be created with parents");
 }
 
-#[test]
-fn open_or_create_rejects_wrong_schema_version() {
+#[tokio::test]
+async fn open_or_create_rejects_wrong_schema_version() {
     let dir = TempDir::new().expect("tempdir");
     let path = db_path(&dir, "secrets.db");
 
     // First open creates the file with `schema_version = 1`.
-    let _store = SealedSecretStore::open_or_create(&path).expect("first open ok");
+    let _store = open_storage(&path).await.expect("first open ok");
 
     // Tamper: rewrite `schema_version` to `99` directly,
     // bypassing the store. This simulates a future pack
@@ -116,14 +117,19 @@ fn open_or_create_rejects_wrong_schema_version() {
     }
 
     // Second open should reject the file with
-    // `SchemaVersionMismatch`.
-    let result = SealedSecretStore::open_or_create(&path);
+    // `StorageError::Migrate` (the storage layer's
+    // typed error; the kernel's `Kernel::new` is
+    // the one that wraps it into the domain-level
+    // `SecurityErrorV1::SchemaVersionMismatch`).
+    let result = open_storage(&path).await;
     match result {
-        Err(afa_contracts::SecurityErrorV1::SchemaVersionMismatch { found, expected }) => {
-            assert_eq!(found, 99);
-            assert_eq!(expected, 1);
+        Err(StorageError::Migrate { version, .. }) => {
+            assert_eq!(
+                version, 99,
+                "the Migrate error must carry the on-disk schema_version it read back"
+            );
         }
-        Err(other) => panic!("expected SchemaVersionMismatch, got {other:?}"),
-        Ok(_) => panic!("expected SchemaVersionMismatch, got Ok"),
+        Err(other) => panic!("expected StorageError::Migrate {{ version: 99, .. }}, got {other:?}"),
+        Ok(_) => panic!("expected StorageError::Migrate, got Ok"),
     }
 }

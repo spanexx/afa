@@ -1,116 +1,118 @@
-//! Code Map: afa-security (the locked box)
-//! - `crypto`: The pure-AEAD layer. `seal` encrypts a plaintext
-//!   under a master key with a fresh random nonce; `open` decrypts
-//!   and returns a `Zeroizing<Vec<u8>>` so the plaintext is wiped
-//!   when the caller drops the buffer. See `crypto.rs`.
-//! - `storage`: The SQLite-backed `SealedSecretStore`. Knows how
-//!   to open or create the secrets database, run the idempotent
-//!   schema, and `insert_active` / `get_active` / `get_any` /
-//!   `rotate` rows. See `storage.rs`.
-//! - `engine`: The `SecurityEngine` struct. Implements the locked
-//!   `SecurityV1` trait by composing `crypto` + `storage` +
-//!   the kernel's `EventBus` (Phase 2 publishes audit events).
-//!   See `engine.rs`.
-//! - `errors`: Re-exports the `SecurityErrorV1` enum from
-//!   `afa-contracts` and gives it a canonical alias
-//!   (`SecurityError`) for engine-internal code. See `errors.rs`.
+//! Code Map: afa-security
+//! - The "desk clerk" crate. Owns the master key (in a
+//!   `Zeroizing<[u8; 32]>` so it is wiped on drop), the
+//!   `Storage` (the vault, after the Phase 0.5a move from
+//!   `SealedSecretStore` to `afa_storage::Storage`), and the
+//!   `Arc<EventBus>` (the audit log). Implements the
+//!   `SecurityV1` trait from `afa-contracts`.
 //!
-//! Story (plain English): This crate is the desk clerk and the
-//! vault. The dictionary they speak (`SecurityV1`,
-//! `SecretRef`, `UnsealedSecret`, `SecurityErrorV1`, the three
-//! audit events) lives in `afa-contracts` — that file is the
-//! dictionary, this file is the staff. The `crypto` module is
-//! the encryption machine the clerk uses to put papers in the
-//! box and take them out. The `storage` module is the vault
-//! itself — a SQLite file that lists which box has which
-//! version of which secret, in what state, and when it was
-//! filed. The `engine` module is the clerk at the desk: it
-//! takes a request, looks up the right box in the vault,
-//! hands the papers to the caller for a moment, and stamps
-//! the audit log. The `errors` module is the list of "sorry,
-//! that didn't work" notes the clerk knows how to deliver
-//! back to the caller.
+//! The crate is split into four modules:
+//! - `crypto`: The pure-AEAD layer (`seal`, `open`,
+//!   `NONCE_LEN`, `KEY_LEN`).
+//! - `events`: Audit-event re-exports + the `now()` clock
+//!   helper.
+//! - `master_key`: The `MasterKey` newtype + the
+//!   `from_hex` constructor.
+//! - `storage`: The `Storage` re-export (was
+//!   `SealedSecretStore` in pre-Phase-0.5a) +
+//!   `SCHEMA_MIGRATIONS` + the three constants
+//!   (`SCHEMA_VERSION`, `STATUS_ACTIVE`, `STATUS_ROTATED`)
+//!   + the `check_schema_version` / `open_storage`
+//!   helpers.
+//! - `engine`: The `SecurityEngine` struct and the
+//!   `impl SecurityV1` block (seal, unseal, rotate,
+//!   lookup_hash).
 //!
-//! The kernel is the only crate that constructs an
-//! `SecurityEngine`; downstream adapters (future packs) get
-//! it through `Arc<dyn SecurityV1>`, never by building one
-//! themselves. That is the whole point of the trait: the
-//! adapter does not know there is a SQLite file behind the
-//! desk, only that it can ask for a secret and get a
-//! zeroing-on-drop handle back.
+//! The public surface is the `SecurityEngine` + the
+//! `Storage` re-export. Every downstream adapter holds an
+//! `Arc<dyn SecurityV1>` from the kernel; the engine is the
+//! only `SecurityV1` impl in the v1 codebase.
 //!
-//! CID Index:
-//! CID:afa-security-lib-001 -> crypto
-//! CID:afa-security-lib-002 -> storage
-//! CID:afa-security-lib-003 -> engine
-//! CID:afa-security-lib-004 -> errors
-//! CID:afa-security-lib-005 -> events
-//! CID:afa-security-lib-006 -> crate-root re-exports
-//! CID:afa-security-lib-007 -> master_key
+//! Story (plain English): This is the room in the bank where
+//! the safe-deposit boxes live. The room has one clerk
+//! (`SecurityEngine`) at one desk. The desk has three
+//! things on it: a copy of the bank's master key (in a
+//! sealed envelope), the index card file (the SQLite
+//! `sealed_secrets` table), and a rubber stamp book (the
+//! event bus) for stamping "I did a thing" notes. Any
+//! customer who walks in has to talk to the clerk — there
+//! is no self-service kiosk.
 //!
-//! Quick lookup: rg -n "CID:afa-security-lib-" crates/afa-security/src/lib.rs
+//! **Doc drift corrections vs. the IMPL draft**:
+//! - **#5**: the engine uses `Storage::with_conn` with
+//!   `Box::pin(async move { ... })` (an async closure),
+//!   not the IMPL's "sync `seal_secret` helper" — the
+//!   IMPL's design would re-introduce the version race
+//!   the `BEGIN IMMEDIATE` pattern was here to prevent.
+//! - **#6**: the `rusqlite` dep stays (the engine writes
+//!   its own SQL via `Storage::with_conn`); the IMPL said
+//!   to remove it but the engine still needs the
+//!   `rusqlite` types for `query_row`, `execute`,
+//!   `Transaction`, etc.
+//!
+//! Quick lookup: rg -n "CID:afa-security-" crates/afa-security/src/
 
-#![doc(html_root_url = "https://docs.rs/afa-security/0.1.0")]
+mod crypto;
+mod engine;
+mod events;
+mod master_key;
+mod storage;
 
-// CID:afa-security-lib-001 - crypto
-// Purpose: The pure-AEAD layer. `seal` produces a fresh nonce and
-// a ciphertext; `open` reverses it. The master key is held by the
-// caller (the engine), never stored in this module. The output
-// of `open` is `Zeroizing<Vec<u8>>` so the buffer is wiped on
-// drop. Used by: `engine::SecurityEngine::seal` and `unseal`.
-pub mod crypto;
-// CID:afa-security-lib-002 - storage
-// Purpose: The SQLite-backed `SealedSecretStore`. Owns the
-// connection (behind a `tokio::sync::Mutex`), runs the
-// idempotent schema, exposes `open_or_create`, `insert_active`,
-// `get_active`, `get_any` (Phase 2), and `rotate` (Phase 2).
-// Used by: `engine::SecurityEngine`.
-pub mod storage;
-// CID:afa-security-lib-003 - engine
-// Purpose: The `SecurityEngine` struct. The desk clerk. Composes
-// `crypto` + `storage` + the kernel's `EventBus` (Phase 2).
-// Implements the locked `SecurityV1` trait. Used by: the kernel
-// (constructs one), and every downstream adapter that needs a
-// secret (holds an `Arc<dyn SecurityV1>` from the kernel).
-pub mod engine;
-// CID:afa-security-lib-004 - errors
-// Purpose: Re-export `SecurityErrorV1` from `afa-contracts` and
-// give it the alias `SecurityError` for engine-internal code.
-// No new error variants are introduced here (per the IMPL's
-// planning principle #2: "no new `AfaErrorKind` variants").
-// Used by: every public function in this crate.
-pub mod errors;
-// CID:afa-security-lib-005 - events
-// Purpose: Re-export the three audit-fact structs
-// (`SecretSealed`, `SecretUnsealed`, `SecretRotated`) and
-// provide a single `now()` helper for the `timestamp` field
-// on every published event. See `events.rs` for the
-// per-event Code Map.
-// Used by: `engine::SecurityEngine` (every publish site),
-// the audit-event shape test
-// (`tests/audit_event_shape.rs`).
-pub mod events;
-// CID:afa-security-lib-007 - master_key
-// Purpose: The `MasterKey` newtype. The single, type-safe
-// envelope around the 32-byte master key: built by
-// `from_hex` (the one and only path an env-var
-// reader or a test uses), consumed by
-// `SecurityEngine::new` (the one and only path the
-// engine sees the key). The newtype is the only
-// way the kernel touches the key, which lets the
-// wipe-on-drop guarantee be tied to the type (a
-// stray `[u8; 32]` would lose it). See `master_key.rs`
-// for the per-method Code Map.
-// Used by: `SecurityEngine::new` (takes `&MasterKey`),
-// `tests/boot_failures.rs` `read_master_key_from_env`.
-pub mod master_key;
+// Public surface: the `SecurityEngine` (the only
+// `SecurityV1` impl in v1) + the `Storage` re-export
+// (downstream crates that need to read the
+// `sealed_secrets` table directly — e.g. the
+// future `afa-observability` engine — import
+// `afa_security::Storage` to get the same `Storage`
+// type the engine uses, without reaching into
+// `afa-storage` directly).
+pub use engine::SecurityEngine;
+pub use storage::Storage;
+// Re-export the schema version the kernel
+// wraps into `SecurityErrorV1::SchemaVersionMismatch`
+// (so the panic message shows the right
+// "expected" number, not a hardcoded `1`).
+pub use storage::SCHEMA_VERSION;
+// Re-export the `open_storage` helper from the
+// `storage` module so the kernel (the only caller
+// that doesn't have direct access to the private
+// module) can boot the SQLite file. Same pattern
+// as the `Storage` re-export above — the
+// `storage` module stays private to the crate;
+// only the items the kernel needs are re-exported.
+pub use storage::open_storage;
+// Re-export the `MasterKey` newtype so the
+// kernel (and any future crate that needs to
+// accept a master key from the environment) can
+// name the type without reaching into the
+// private `master_key` module.
+pub use master_key::MasterKey;
 
-// CID:afa-security-lib-006 - crate-root re-exports
-// Purpose: Re-export the public types downstream code reaches
-// for most often. Anything not re-exported here is not part of
-// the contract.
-pub use crate::engine::SecurityEngine;
-pub use crate::errors::SecurityError;
-pub use crate::events::{SecretRotated, SecretSealed, SecretUnsealed};
-pub use crate::master_key::{MasterKey, MASTER_KEY_LEN};
-pub use crate::storage::SealedSecretStore;
+pub use afa_contracts::SecurityErrorV1;
+// Type alias so internal modules (crypto, master_key,
+// engine) can use the shorter name `SecurityError` in
+// their function signatures and tests, matching the
+// pre-Phase-0.5a style. The public re-export above
+// (the contract type) is the canonical name; the
+// alias is for internal ergonomics only.
+pub use SecurityErrorV1 as SecurityError;
+// Re-export the pure-AEAD primitives so the
+// `crypto_roundtrip` integration test can exercise
+// the seal/open boundary cases (0, 1, 64, 4096,
+// 65535 bytes) directly, without going through
+// the engine. The engine's `seal` / `unseal` are
+// tested separately in `engine.rs`; this test
+// is the "is the AES-256-GCM plumbing correct at
+// the byte level?" check. The two constants
+// (`NONCE_LEN`, `KEY_LEN`) are re-exported alongside
+// so the test can name them without re-deriving
+// them. The `crypto` module itself stays private
+// (the engine is the only public-side caller;
+// downstream adapters go through `SecurityV1`).
+pub use crypto::{open, seal, KEY_LEN, NONCE_LEN};
+// Re-export the audit-fact types so downstream
+// adapters that subscribe to the bus do not have
+// to reach into `afa-contracts` for them. The
+// engine's `publish` sites also use these names
+// (in `engine.rs`).
+pub use events::{SecretRotated, SecretSealed, SecretUnsealed};

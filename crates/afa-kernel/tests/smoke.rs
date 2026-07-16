@@ -59,11 +59,11 @@ impl AfaEvent for Ack {}
 /// (dropping the `TempDir` would delete the file,
 /// which would race with the engine's open
 /// connection on slow filesystems).
-fn fresh_kernel() -> (TempDir, Kernel) {
+async fn fresh_kernel() -> (TempDir, Kernel) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("secrets.db");
     let key = MasterKey::from([0x42u8; 32]);
-    let kernel = Kernel::new(&key, path).expect("kernel::new");
+    let kernel = Kernel::new(&key, path).await.expect("kernel::new");
     (dir, kernel)
 }
 
@@ -74,7 +74,7 @@ async fn the_full_pipeline_works_from_a_downstream_consumer_view() {
     //    `Kernel::new(master_key, secrets_db_path)`.
     //    No `pub(crate)` accessors are touched
     //    anywhere in this file.
-    let (_dir, kernel) = fresh_kernel();
+    let (_dir, kernel) = fresh_kernel().await;
 
     // 2. The consumer subscribes to the audit-trail
     //    fact (`EventReceived`) and to the follow-up
@@ -174,7 +174,7 @@ async fn a_panicking_step_does_not_break_the_smoke_test_pipeline() {
     // that panics must not propagate out through
     // `Runtime::ingest` and must result in a
     // `WorkflowStepFailed` fact on the bus.
-    let (_dir, kernel) = fresh_kernel();
+    let (_dir, kernel) = fresh_kernel().await;
     let bus = kernel.event_bus();
     let mut failed = bus.subscribe::<WorkflowStepFailed>(16);
     let mut audit = bus.subscribe::<EventReceived>(16);

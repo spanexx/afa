@@ -15,6 +15,14 @@ tracing = "0.1"
 zeroize = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 tokio = { version = "1", features = ["sync"] }
+# `StorageError::Migrate { source: rusqlite::Error }` (TRD §2.2 of
+# the observability-baseline pack). The type lives in
+# afa-contracts (the dictionary) but references the concrete
+# `rusqlite::Error` so `?` on a `rusqlite::Error` produces a
+# `StorageError` without an adapter. The I/O is in
+# afa-storage; afa-contracts only carries the type
+# definition.
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [dev-dependencies]
 serde_json = "1.0"

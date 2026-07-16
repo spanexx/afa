@@ -1,125 +1,156 @@
-//! Code Map: SQLite-backed sealed-secret store
-//! - `SealedSecretStore`: The vault. Owns the `rusqlite::Connection`
-//!   behind a `tokio::sync::Mutex` so the engine can hand it
-//!   across `await` points without `unsafe`. Exposes
-//!   `open_or_create`, `insert_active`, `get_active`, `get_any`,
-//!   and `rotate`. See the `impl` block below.
-//! - `SCHEMA_VERSION`: The on-disk schema version this engine
-//!   supports. A future pack that changes the schema increments
-//!   this constant and adds a migration step to `open_or_create`.
+//! Code Map: afa-security::storage
+//! - `Storage`: Re-export of `afa_storage::Storage` —
+//!   the `Arc<tokio::sync::Mutex<Connection>>` wrapper
+//!   with `path: PathBuf` and the three locked
+//!   methods (`open`, `migrate`, `with_conn`).
+//! - `SCHEMA_MIGRATIONS`: The `&'static [Migration]`
+//!   for the security pack's two tables
+//!   (`sealed_secrets` and `afa_security_meta`).
+//!   The engine hands this to
+//!   `afa_storage::migrate` at boot.
+//! - `SCHEMA_VERSION`: The integer
+//!   `afa_security_meta.schema_version` value this
+//!   engine writes and expects to read back. Bump
+//!   on any breaking schema change.
+//! - `STATUS_ACTIVE` / `STATUS_ROTATED`: The two
+//!   `sealed_secrets.status` values. Encoded as
+//!   strings, not integers, so a row is human-
+//!   readable when the file is opened in
+//!   `sqlite3`'s CLI.
+//! - `check_schema_version`: The
+//!   "read-after-migrate" sanity check. The
+//!   `afa_storage::migrate` function only knows
+//!   about the `_afa_migrations` table; the
+//!   per-engine `schema_version` row is the
+//!   engine's own concern.
 //!
-//! Story (plain English): Imagine the vault's index card file.
-//! Every box that has ever been filed has a card. The card
-//! says: the box's name, its version number, whether it is
-//! still the active one (or whether a newer version has
-//! replaced it), the serial number the seal machine printed
-//! when the box was filed, the sealed envelope itself, and
-//! the time the box was filed. The clerk can flip through
-//! the cards to find a particular `(name, version)`, can file
-//! a new card, or can update the "rotated" stamp on an old
-//! card when a new one is filed. The file is the
-//! `sealed_secrets` table; the index cards are the rows.
+//! Story (plain English): This is the desk's
+//! bookshelf catalogue. It doesn't store any books
+//! (the connection lives in `afa_storage::Storage`);
+//! it just records **what shape** the shelf is
+//! expected to be (the two `CREATE TABLE`
+//! statements) and **what edition** of the catalogue
+//! this engine is reading (`schema_version = 1`).
+//! When a future pack ships a new edition (a new
+//! column, a new table, a new index), the
+//! `SCHEMA_MIGRATIONS` array grows by one entry,
+//! the new `Migration` runs on the next boot (the
+//! migrate loop sees the version is new and applies
+//! it inside a transaction), and the engine bumps
+//! `SCHEMA_VERSION` to match.
 //!
-//! A second card file (`afa_security_meta`) records the
-//! schema version, so a future pack that changes the file's
-//! format can detect "I cannot read this old file" before
-//! it tries to do anything. Today, the schema version is
-//! always 1; tomorrow, a v2 schema ships and `open_or_create`
-//! will fail with `SchemaVersionMismatch` on a v1 file.
-//!
-//! Every write (`insert_active`, `rotate`) goes through a
-//! `BEGIN IMMEDIATE` transaction so the engine's "no two
-//! callers ever receive the same version number" rule holds
-//! even when two adapters race to seal or rotate the same
-//! name at the same time.
+//! **Doc drift correction vs. the IMPL draft**:
+//! the IMPL's draft promised a `StorageError` re-
+//! export (it lives in `afa-contracts` and is
+//! re-exported from `afa_storage`); the
+//! `SecurityError` ↔ `StorageError` mapping is
+//! done in the engine, not in this module. The
+//! engine's `with_conn` calls return
+//! `StorageError`; the engine wraps them in
+//! `SecurityError` (typically
+//! `SecurityError::Internal` or
+//! `SecurityError::StorageCorrupted`).
 //!
 //! CID Index:
-//! CID:afa-security-storage-001 -> SealedSecretStore struct
-//! CID:afa-security-storage-002 -> open_or_create
-//! CID:afa-security-storage-003 -> insert_active
-//! CID:afa-security-storage-004 -> get_active
-//! CID:afa-security-storage-005 -> get_any
-//! CID:afa-security-storage-006 -> rotate
+//! CID:afa-security-storage-001 -> Storage
+//! CID:afa-security-storage-002 -> SCHEMA_MIGRATIONS
+//! CID:afa-security-storage-003 -> SCHEMA_VERSION
+//! CID:afa-security-storage-004 -> STATUS_ACTIVE
+//! CID:afa-security-storage-005 -> STATUS_ROTATED
+//! CID:afa-security-storage-006 -> check_schema_version
 //!
 //! Quick lookup: rg -n "CID:afa-security-storage-" crates/afa-security/src/storage.rs
 
-use crate::crypto::NONCE_LEN;
-use crate::SecurityError;
-use rusqlite::{params, Connection, OptionalExtension};
+use afa_contracts::{Migration, StorageError};
 use std::path::Path;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 
-/// The on-disk schema version this engine supports. A future
-/// pack that changes the schema increments this constant and
-/// adds a migration step to `open_or_create`.
-pub const SCHEMA_VERSION: u32 = 1;
+// Re-export the `Storage` newtype from `afa-storage`
+// so the rest of `afa-security` (the engine's
+// `impl SecurityV1`, the `check_schema_version`
+// helper) can name the type via `crate::storage::Storage`
+// without reaching across crates. The crate root
+// re-exports it again as `afa_security::Storage`
+// (see `lib.rs`).
+pub use afa_storage::Storage;
 
-/// The `status` column value for a row that is the live one
-/// to use. The other value is `STATUS_ROTATED`, set by
-/// `rotate` when a newer version takes over.
-pub const STATUS_ACTIVE: &str = "active";
-/// The `status` column value for a row that has been replaced
-/// by a newer version. The row stays on disk for forensic
-/// audit; `get_active` skips it.
-pub const STATUS_ROTATED: &str = "rotated";
+// CID:afa-security-storage-001 - Storage
+// Purpose: The public re-export of
+// `afa_storage::Storage`. The security pack
+// doesn't own the `Connection` anymore (Phase
+// 0.5a moved it to `afa_storage`); it just
+// hands a `Storage` to the engine and trusts
+// `afa_storage` for the open / migrate / lock
+// plumbing. The engine does its own SQL via
+// `Storage::with_conn`.
+//
+// **API change vs. pre-Phase-0.5a**: the old
+// `SealedSecretStore` struct is GONE. The
+// public surface is now `Storage` (re-exported)
+// + `SCHEMA_MIGRATIONS` + the three constants.
+// Any caller that referenced `SealedSecretStore`
+// must update (the kernel's `Kernel::new` and
+// the security tests' helpers are the two known
+// call sites).
+//
+// Used by: the engine (every SQL call), the
+// kernel (boots a `Storage` and hands it to the
+// engine).
+// (the type is re-exported via `crate::Storage` in lib.rs)
 
-// CID:afa-security-storage-001 - SealedSecretStore struct
-// Purpose: The vault's index card file. Owns the
-// `rusqlite::Connection` behind a `tokio::sync::Mutex` (so
-// the engine can hand it across `await` points without
-// `unsafe` and so the `Connection`'s non-`Sync` borrow does
-// not escape the lock guard). Cheap to clone (`Arc<Mutex<...>>`).
-// Used by: `engine::SecurityEngine`.
-#[derive(Clone)]
-pub struct SealedSecretStore {
-    conn: Arc<Mutex<Connection>>,
-}
-
-// CID:afa-security-storage-002 - open_or_create
-// Purpose: Open the SQLite file at `path` (creating it and
-// the parent directory if missing), run the idempotent
-// schema, record `schema_version` in `afa_security_meta`,
-// and reject the file if its `schema_version` is not the one
-// this engine supports.
-// Errors: `StorageUnreachable` on path/permission failures,
-// `SchemaVersionMismatch { found, expected }` on a v!=1 file.
-// Used by: `engine::SecurityEngine::new` (Phase 3 wires
-// `Kernel::new` to call it) and the Phase 1 test
-// `tests/first_boot_creates_db.rs`.
-impl SealedSecretStore {
-    pub fn open_or_create(path: &Path) -> Result<Self, SecurityError> {
-        // Ensure the parent directory exists. This is the
-        // "first deploy" footgun the IMPL rollout notes call
-        // out: `/var/lib/afa/` may not exist on a fresh
-        // image, and we do not want the kernel to fail on
-        // its very first request. `create_dir_all` is a
-        // no-op if the directory already exists.
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent).map_err(|e| SecurityError::StorageUnreachable {
-                    reason: format!("could not create parent dir {}: {}", parent.display(), e),
-                })?;
-            }
-        }
-
-        // Open (or create) the SQLite file. The `bundled`
-        // feature in `Cargo.toml` removes any host-SQLite
-        // version concern.
-        let conn = Connection::open(path).map_err(|e| SecurityError::StorageUnreachable {
-            reason: format!("could not open {}: {}", path.display(), e),
-        })?;
-
-        // Run the idempotent schema. Every statement is
-        // `IF NOT EXISTS` so `open_or_create` is safe to
-        // call on every boot. The `PRAGMA user_version`
-        // line is the standard SQLite pattern for
-        // recording a schema version without needing a
-        // second table; we use a second table
-        // (`afa_security_meta`) so the value travels with
-        // the file when it is copied between machines.
-        conn.execute_batch(
-            r#"
+// CID:afa-security-storage-002 - SCHEMA_MIGRATIONS
+// Purpose: The `&'static [Migration]` for the
+// security pack's two tables. The engine
+// passes this to `afa_storage::migrate` at boot
+// (via `Kernel::new`, which the kernel calls).
+//
+// Migration 1 (the only migration as of v1):
+//   - `CREATE TABLE IF NOT EXISTS sealed_secrets` —
+//     the main per-secret table. The
+//     `PRIMARY KEY (name, version)` constraint is
+//     what makes a parallel `seal` race fail
+//     cleanly with a UNIQUE constraint violation
+//     (or, with the engine's `BEGIN IMMEDIATE`
+//     pattern, serialize correctly).
+//   - `CREATE TABLE IF NOT EXISTS afa_security_meta` —
+//     the version tag, in a table (not
+//     `PRAGMA user_version`) so it travels with
+//     the file when the file is copied between
+//     machines (the `PRAGMA` is per-connection
+//     and not persisted to the file).
+//   - `INSERT OR IGNORE INTO afa_security_meta` —
+//     the "stamp the version on the file" step.
+//     Idempotent: re-running the migration does
+//     not overwrite an existing `schema_version`
+//     row.
+//
+// To add a migration (future pack): append a
+// new `Migration { version: 2, sql: "..." }` to
+// this array, bump `SCHEMA_VERSION` to 2, and
+// ship. The migrate loop applies migration 2
+// only on a fresh boot or a file that was last
+// migrated to version 1.
+//
+// The `r#"..."#` raw string keeps the multi-
+// statement SQL readable (the embedded single
+// quotes are the only escape needed).
+//
+// Used by: `Kernel::new` (the boot path), via
+// `afa_storage::migrate(&storage, SCHEMA_MIGRATIONS)`.
+//
+// **Migration history**:
+//   - v1: initial schema (`sealed_secrets` + `afa_security_meta`).
+//   - v2 (Phase 0.5b): adds the `sha256` column
+//     that `lookup_hash` reads. The column is
+//     `BLOB` (not `TEXT`) so the on-disk size
+//     matches the SHA-256 output exactly; the
+//     engine stores lowercase hex (64 ASCII
+//     bytes) so the `lookup_hash` constant-time
+//     compare can short-circuit on length
+//     without a second decode.
+pub static SCHEMA_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        sql: r#"
             CREATE TABLE IF NOT EXISTS sealed_secrets (
                 name        TEXT NOT NULL,
                 version     INTEGER NOT NULL,
@@ -135,271 +166,239 @@ impl SealedSecretStore {
             );
             INSERT OR IGNORE INTO afa_security_meta (key, value)
                 VALUES ('schema_version', '1');
-            "#,
-        )
-        .map_err(|_| SecurityError::StorageCorrupted)?;
+        "#,
+    },
+    // Phase 0.5b — the `sha256` column. The
+    // `lookup_hash` method reads this column to
+    // constant-time-compare against the incoming
+    // hash. The column is nullable (existing v1
+    // rows have no hash; `lookup_hash` treats a
+    // `NULL` value the same as "no row" and
+    // returns `SecretNotFound`).
+    //
+    // The migration is two statements: (1) add
+    // the `sha256` column, (2) bump the
+    // `schema_version` row from `1` to `2`. The
+    // `check_schema_version` step at the end of
+    // the boot path will see `2` and accept the
+    // file. A file that somehow ended up with
+    // the v2 column but `schema_version = 1`
+    // would be rejected (the column-add and
+    // the version-bump must be atomic).
+    Migration {
+        version: 2,
+        sql: r#"
+            ALTER TABLE sealed_secrets ADD COLUMN sha256 BLOB;
+            UPDATE afa_security_meta SET value = '2' WHERE key = 'schema_version';
+        "#,
+    },
+];
 
-        // Sanity-check the schema version. If a future
-        // pack migrates the schema, this check is the
-        // one that turns "the engine silently misreads
-        // the file" into "the engine fails fast at boot
-        // with a clear error."
-        let found: Option<String> = conn
-            .query_row(
+// CID:afa-security-storage-003 - SCHEMA_VERSION
+// Purpose: The integer `schema_version` value
+// this engine writes (in migration 2) and
+// expects to read back (via
+// `check_schema_version`). Bump on any
+// breaking schema change; a mismatch surfaces
+// as `SecurityError::SchemaVersionMismatch` at
+// boot. The constant is `pub` (not `pub(crate)`)
+// so the kernel and the boot-failures test can
+// reference it from outside the security crate.
+//
+// The value matches the last `Migration { version: N, ... }`
+// in `SCHEMA_MIGRATIONS` (the `N`). If you
+// change one, change the other.
+//
+// History: 1 (initial), 2 (Phase 0.5b, adds the
+// `sha256` column for `lookup_hash`).
+pub const SCHEMA_VERSION: u32 = 2;
+
+// CID:afa-security-storage-004 - STATUS_ACTIVE
+// Purpose: The `sealed_secrets.status` value
+// for a row that is the current version for its
+// `name`. A new `seal` or `rotate` inserts a
+// row at this status. The `lookup_hash` method
+// (the new real override in Phase 0.5b) filters
+// on `status = 'active'`.
+pub const STATUS_ACTIVE: &str = "active";
+
+// CID:afa-security-storage-005 - STATUS_ROTATED
+// Purpose: The `sealed_secrets.status` value
+// for a row that has been superseded by a newer
+// version. A `rotate` updates the old row from
+// `'active'` to `'rotated'` inside the same
+// transaction that inserts the new row. A
+// `lookup_hash` for the old version returns
+// `Err(SecretRotated)` (a different error from
+// `SecretNotFound` — see the IMPL's
+// distinguishing rule).
+pub const STATUS_ROTATED: &str = "rotated";
+
+// CID:afa-security-storage-006 - check_schema_version
+// Purpose: The "read-after-migrate" sanity
+// check. The `afa_storage::migrate` function
+// only knows about the `_afa_migrations` table
+// (the migration tracking); the per-engine
+// `schema_version` row is a separate concern,
+// read here. Returns the read `schema_version`
+// as a `u32` (or 0 if the row is missing —
+// which would be an inconsistent state since
+// the migration inserts the row, but the
+// `unwrap_or(0)` is the safe fallback that
+// still surfaces as a `SchemaVersionMismatch`
+// error).
+//
+// Errors:
+// - `StorageError::Migrate { version: 0, source }`
+//   on any SQL error (the `version: 0` is a
+//   placeholder; this is a post-migrate
+//   read, not a migration itself).
+//
+// Used by: the engine's boot path (in
+// `SecurityEngine::new`) to verify the
+// migration ran correctly. The kernel
+// delegates the boot to the engine; the
+// engine's `new` is the one place that
+// combines the `Storage`, the master key,
+// the event bus, and the schema_version
+// check.
+pub async fn check_schema_version(storage: &Storage) -> Result<u32, StorageError> {
+    afa_storage::with_conn(storage, |conn| {
+        Box::pin(async move {
+            // The `afa_security_meta` table may not
+            // exist on a fresh file (it is created by
+            // migration 1, which has not run yet at
+            // the pre-migrate check). Treat
+            // "no such table" as "version 0" so the
+            // pre-migrate check does not spuriously
+            // fail. The `query_row(...).optional()`
+            // would only return `Ok(None)` if the
+            // table exists but the row is missing;
+            // the rusqlite error from "no such
+            // table" is mapped here to `Ok(None)`,
+            // which then unwraps to `version 0`.
+            let found: Option<String> = match conn.query_row(
                 "SELECT value FROM afa_security_meta WHERE key = 'schema_version'",
                 [],
                 |row| row.get(0),
-            )
-            .optional()
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        let found_version: u32 = found.as_deref().and_then(|s| s.parse().ok()).unwrap_or(0);
-        if found_version != SCHEMA_VERSION {
-            return Err(SecurityError::SchemaVersionMismatch {
-                found: found_version,
-                expected: SCHEMA_VERSION,
-            });
-        }
-
-        Ok(Self {
-            conn: Arc::new(Mutex::new(conn)),
+            ) {
+                Ok(row) => Some(row),
+                Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                Err(rusqlite::Error::SqliteFailure(err, _))
+                    if err.code == rusqlite::ErrorCode::Unknown
+                        || err.code == rusqlite::ErrorCode::DatabaseCorrupt =>
+                {
+                    // "No such table" is a
+                    // `SqliteFailure` with code
+                    // `ErrorCode::DatabaseCorrupt` (the
+                    // generic "something is wrong" code;
+                    // SQLite has no "NoSuchTable" code).
+                    // Treat as "table missing → version
+                    // 0".
+                    None
+                }
+                Err(e) => return Err(StorageError::Migrate { version: 0, source: e }),
+            };
+            let version: u32 = found
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            Ok::<u32, StorageError>(version)
         })
+    })
+    .await
+}
+
+// CID:afa-security-storage-007 - (helper) open_storage
+// Purpose: The "open + migrate + check" helper
+// the kernel calls. Bundles the three steps
+// (open the file, run the security migrations,
+// check the schema_version) into one call so
+// `Kernel::new` doesn't have to know about
+// the migration constant. Returns a `Storage`
+// ready for the engine.
+//
+// Errors: any of the three steps' errors
+// surface as a `StorageError` (the kernel
+// wraps the `Open` error in
+// `SecurityError::StorageUnreachable`, the
+// `Migrate` error in `StorageCorrupted`, and
+// the `check_schema_version` mismatch in
+// `SchemaVersionMismatch`).
+//
+// **API change vs. pre-Phase-0.5a**: the old
+// `SealedSecretStore::open_or_create` did
+// the same three steps but in one struct
+// method. The new design splits them: the
+// `Storage` does the I/O (open / lock), the
+// `SCHEMA_MIGRATIONS` is the data, the
+// `check_schema_version` is the read. Three
+// functions, one call site.
+// **Step ordering vs. pre-Phase-0.5b**:
+// the version check runs BEFORE the
+// migration step. The old order
+// (open → migrate → check) meant a tampered
+// file with `schema_version = '99'` would
+// have its `schema_version` row overwritten
+// by the v2 migration's `UPDATE ... SET
+// value = '2'`, and the file would silently
+// be accepted. The new order (open → check
+// → migrate → verify) refuses a file whose
+// claimed version is HIGHER than the engine
+// supports (a "future" schema this engine
+// cannot read), and only runs the migrations
+// on a file whose claimed version is LOWER
+// than or equal to the engine's
+// `SCHEMA_VERSION`. A file with NO
+// `schema_version` row at all (a fresh file
+// or a tampered file that deleted the row)
+// is treated as version 0 (the
+// `check_schema_version` function returns 0
+// for a missing row), and the migrations
+// run to bring it up to date.
+//
+// This is the IMPL's "fail fast at boot with
+// a typed error" rule applied to the
+// "restored an old secrets.db" footgun AND
+// the "downgraded the binary" footgun. Both
+// should fail at boot, not silently
+// auto-migrate.
+pub async fn open_storage(path: &Path) -> Result<Storage, StorageError> {
+    let storage = afa_storage::open(path)?;
+
+    // Step 1: refuse a file that claims a
+    // future version (higher than what this
+    // engine can read). The check runs
+    // BEFORE the migrate so a tampered
+    // `schema_version` row cannot be
+    // overwritten by the v2 migration's
+    // `UPDATE`.
+    let pre_migrate_version = check_schema_version(&storage).await?;
+    if pre_migrate_version > SCHEMA_VERSION {
+        return Err(StorageError::Migrate {
+            version: pre_migrate_version,
+            source: rusqlite::Error::InvalidQuery, // placeholder; the kernel wraps this
+        });
     }
 
-    /// Borrow the underlying connection (behind the
-    /// `tokio::sync::Mutex`) for engine-internal use. The
-    /// engine's `seal` flow needs to compute the next
-    /// version number and insert the row in the SAME
-    /// `BEGIN IMMEDIATE` transaction (so two parallel
-    /// `seal` calls cannot pick the same version). Keeping
-    /// the transaction at the engine layer (rather than
-    /// inside `SealedSecretStore`) lets the engine put the
-    /// AEAD `seal` call between the version read and the
-    /// row insert — the AAD string
-    /// `format!("{}:{}", name, version)` needs the
-    /// version visible to the encrypt step, so the
-    /// version and the insert have to share a transaction.
-    /// Marked `pub(crate)` so the accessor does not leak
-    /// to downstream adapters (who only ever hold an
-    /// `Arc<dyn SecurityV1>` and never see the
-    /// `SealedSecretStore` at all).
-    pub(crate) fn conn(&self) -> &Arc<Mutex<Connection>> {
-        &self.conn
-    }
+    // Step 2: run the migrations (adds the
+    // `sha256` column on a v1→v2 upgrade,
+    // bumps `schema_version` from 1 to 2).
+    afa_storage::migrate(&storage, SCHEMA_MIGRATIONS).await?;
 
-    // CID:afa-security-storage-003 - insert_active
-    // Purpose: Insert a new `(name, version, 'active', nonce,
-    // ciphertext, created_at)` row. Caller computes `version`
-    // (= `MAX(version) + 1` for the same `name`, inside the
-    // same `BEGIN IMMEDIATE` transaction in the engine). The
-    // store does NOT compute the version itself because the
-    // engine's `seal` flow needs the version visible to the
-    // AEAD-AAD string BEFORE the row is written; splitting
-    // the version read from the row insert is the engine's
-    // job, not the store's.
-    // Errors: `StorageCorrupted` on SQL failures (the
-    // `BEGIN IMMEDIATE` for the `seal` flow prevents the
-    // one realistic race: two `seal` calls computing the
-    // same `MAX(version)+1` and trying to insert with the
-    // same `(name, version)`).
-    // Used by: `engine::SecurityEngine::seal`.
-    pub async fn insert_active(
-        &self,
-        name: &str,
-        version: u32,
-        nonce: &[u8; NONCE_LEN],
-        ciphertext: &[u8],
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), SecurityError> {
-        let conn = self.conn.lock().await;
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        tx.execute_batch("BEGIN IMMEDIATE")
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        tx.execute(
-            "INSERT INTO sealed_secrets \
-             (name, version, status, nonce, ciphertext, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                name,
-                version,
-                STATUS_ACTIVE,
-                &nonce[..],
-                ciphertext,
-                timestamp.to_rfc3339(),
-            ],
-        )
-        .map_err(|_| SecurityError::StorageCorrupted)?;
-        tx.execute_batch("COMMIT")
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        Ok(())
+    // Step 3: verify the post-migrate
+    // version matches the engine's
+    // expected `SCHEMA_VERSION`. A migration
+    // that failed to bump the version row
+    // (e.g. the `UPDATE` step was edited out
+    // by a future maintainer) would be
+    // caught here.
+    let post_migrate_version = check_schema_version(&storage).await?;
+    if post_migrate_version != SCHEMA_VERSION {
+        return Err(StorageError::Migrate {
+            version: post_migrate_version,
+            source: rusqlite::Error::InvalidQuery, // placeholder; the kernel wraps this
+        });
     }
-
-    // CID:afa-security-storage-004 - get_active
-    // Purpose: Look up the row for `(name, version)` with
-    // `status='active'`. Returns `Some((ciphertext, nonce))`
-    // if found, `None` otherwise. The engine uses `None` to
-    // mean "either the secret was never sealed under that
-    // name, or the version was wrong, or the version was
-    // rotated." `get_any` (CID-005) is the version of this
-    // query that returns the `status` column too, so the
-    // engine can distinguish `SecretNotFound` (no row at
-    // all) from `SecretRotated` (row exists with
-    // `status='rotated'`).
-    // Errors: `StorageCorrupted` on SQL failures.
-    // Used by: `engine::SecurityEngine::unseal` (Phase 1
-    // — Phase 2's updated `unseal` switches to
-    // `get_any`).
-    pub async fn get_active(
-        &self,
-        name: &str,
-        version: u32,
-    ) -> Result<Option<(Vec<u8>, [u8; NONCE_LEN])>, SecurityError> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn
-            .prepare(
-                "SELECT nonce, ciphertext FROM sealed_secrets \
-                 WHERE name = ?1 AND version = ?2 AND status = ?3",
-            )
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        let mut rows = stmt
-            .query(params![name, version, STATUS_ACTIVE])
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        if let Some(row) = rows.next().map_err(|_| SecurityError::StorageCorrupted)? {
-            let nonce_vec: Vec<u8> = row.get(0).map_err(|_| SecurityError::StorageCorrupted)?;
-            let ciphertext: Vec<u8> = row.get(1).map_err(|_| SecurityError::StorageCorrupted)?;
-            if nonce_vec.len() != NONCE_LEN {
-                return Err(SecurityError::StorageCorrupted);
-            }
-            let mut nonce = [0u8; NONCE_LEN];
-            nonce.copy_from_slice(&nonce_vec);
-            Ok(Some((ciphertext, nonce)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    // CID:afa-security-storage-005 - get_any
-    // Purpose: Look up the row for `(name, version)`
-    // REGARDLESS of status. Returns
-    // `Some((ciphertext, nonce, status_string))` if any
-    // row exists, `None` otherwise. The engine's
-    // `unseal` uses this to distinguish the three
-    // cases the `get_active` `None`-collapse hid:
-    // (a) no row at all -> `SecretNotFound`,
-    // (b) row with `status='rotated'` -> `SecretRotated`,
-    // (c) row with `status='active'` -> decrypt and
-    //     return handle.
-    // The `status` is returned as a `String` rather than
-    // an enum so the storage layer does not have to know
-    // about the engine's internal enum (the engine is
-    // the only caller and compares to the
-    // `STATUS_ACTIVE` / `STATUS_ROTATED` constants).
-    // Errors: `StorageCorrupted` on SQL failures.
-    // Used by: `engine::SecurityEngine::unseal`
-    // (Phase 2 — replaces the Phase 1 `get_active`
-    // call site).
-    pub async fn get_any(
-        &self,
-        name: &str,
-        version: u32,
-    ) -> Result<Option<(Vec<u8>, [u8; NONCE_LEN], String)>, SecurityError> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn
-            .prepare(
-                "SELECT nonce, ciphertext, status FROM sealed_secrets \
-                 WHERE name = ?1 AND version = ?2",
-            )
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        let mut rows = stmt
-            .query(params![name, version])
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        if let Some(row) = rows.next().map_err(|_| SecurityError::StorageCorrupted)? {
-            let nonce_vec: Vec<u8> = row.get(0).map_err(|_| SecurityError::StorageCorrupted)?;
-            let ciphertext: Vec<u8> = row.get(1).map_err(|_| SecurityError::StorageCorrupted)?;
-            let status: String = row.get(2).map_err(|_| SecurityError::StorageCorrupted)?;
-            if nonce_vec.len() != NONCE_LEN {
-                return Err(SecurityError::StorageCorrupted);
-            }
-            let mut nonce = [0u8; NONCE_LEN];
-            nonce.copy_from_slice(&nonce_vec);
-            Ok(Some((ciphertext, nonce, status)))
-        } else {
-            Ok(None)
-        }
-    }
-
-    // CID:afa-security-storage-006 - rotate
-    // Purpose: Atomically (a) update the old row's `status`
-    // to `'rotated'` AND (b) insert the new active row,
-    // all inside a single `TransactionBehavior::Immediate`
-    // transaction. The two writes either both happen or
-    // both roll back — a crash between them cannot leave a
-    // "neither row exists" or "both rows are active" state.
-    // (Phase 1's code used `unchecked_transaction()` +
-    // `execute_batch("BEGIN IMMEDIATE")`, which double-starts
-    // a transaction and SQL-errors out — see IMPL §7
-    // Drift #7.) The engine runs the version-compute BEFORE
-    // calling this method (so the AAD string can include the
-    // new version) and passes the already-computed
-    // `new_version` in.
-    // Errors: `StorageCorrupted` on SQL failures (the
-    // `BEGIN IMMEDIATE` is the only thing standing between
-    // us and a duplicate-version race — two parallel
-    // `rotate` calls reading the same `MAX(version)+1` is
-    // the failure mode the transaction prevents).
-    // Used by: `engine::SecurityEngine::rotate` (Phase 2).
-    pub async fn rotate(
-        &self,
-        name: &str,
-        old_version: u32,
-        new_version: u32,
-        new_nonce: &[u8; NONCE_LEN],
-        new_ciphertext: &[u8],
-        timestamp: chrono::DateTime<chrono::Utc>,
-    ) -> Result<(), SecurityError> {
-        let mut conn = self.conn.lock().await;
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        // Mark the old row as rotated. The engine's
-        // `get_any`-first check (in `engine::rotate`)
-        // already verified the old row exists and is
-        // `status='active'`, so a 0-row update here is
-        // a corruption / race window and we map it to
-        // `StorageCorrupted` rather than silently
-        // ignoring it.
-        let updated = tx
-            .execute(
-                "UPDATE sealed_secrets SET status = ?1 \
-                 WHERE name = ?2 AND version = ?3 AND status = ?4",
-                params![STATUS_ROTATED, name, old_version, STATUS_ACTIVE],
-            )
-            .map_err(|_| SecurityError::StorageCorrupted)?;
-        if updated != 1 {
-            return Err(SecurityError::StorageCorrupted);
-        }
-        // Insert the new active row. Same `(name,
-        // version)` uniqueness check as
-        // `insert_active`; the `BEGIN IMMEDIATE` is
-        // the only thing preventing a duplicate
-        // `new_version` if two parallel rotates
-        // computed the same `MAX(version)+1`.
-        tx.execute(
-            "INSERT INTO sealed_secrets \
-             (name, version, status, nonce, ciphertext, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                name,
-                new_version,
-                STATUS_ACTIVE,
-                &new_nonce[..],
-                new_ciphertext,
-                timestamp.to_rfc3339(),
-            ],
-        )
-        .map_err(|_| SecurityError::StorageCorrupted)?;
-        tx.commit().map_err(|_| SecurityError::StorageCorrupted)?;
-        Ok(())
-    }
+    Ok(storage)
 }

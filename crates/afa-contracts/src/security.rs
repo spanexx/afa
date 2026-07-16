@@ -107,6 +107,41 @@ pub trait SecurityV1: Send + Sync {
         new_plaintext: &[u8],
         ctx: &ExecutionContext,
     ) -> Result<SecretRef, SecurityErrorV1>;
+
+    /// Look up the active hash for `name` and constant-time
+    /// compare it against `incoming_hash`. Returns `Ok(true)`
+    /// on match, `Ok(false)` on mismatch, and
+    /// `Err(SecretNotFound { name, version: 0 })` if no active
+    /// row exists. The constant-time compare MUST happen inside
+    /// the engine (not at the call site) so the comparison
+    /// latency is not a side-channel oracle. The dashboard
+    /// transport's bearer-auth middleware (Pack #6 Phase 3)
+    /// is the primary caller: it computes `sha256(token)` and
+    /// hands the hex to this method instead of the plaintext
+    /// token, then a later Pack #7a amendment accepts a
+    /// `hash:`-prefixed bearer that skips the in-middleware
+    /// hash step entirely.
+    ///
+    /// Locked by Pack #7a S1 (the bearer-auth hash-only
+    /// path). The default implementation returns
+    /// `Err(Internal)` so existing `impl SecurityV1` blocks
+    /// (the 17 test fakes across the workspace) continue to
+    /// compile — the real override lives in
+    /// `afa-security::SecurityEngine` and is wired in Pack #6
+    /// Phase 0.5b (the security refactor). Any code that
+    /// relies on the default behaviour (i.e. that calls
+    /// `lookup_hash` against a non-overriding fake) will
+    /// receive the `Internal` error at runtime, which is the
+    /// intended behaviour — a fake that does not implement
+    /// lookup_hash should not silently accept arbitrary
+    /// hashes.
+    async fn lookup_hash(&self, name: &str, incoming_hash: &str) -> Result<bool, SecurityErrorV1> {
+        let _ = (name, incoming_hash);
+        Err(SecurityErrorV1::Internal {
+            reason: "lookup_hash not implemented in this build (Pack #6 Phase 0.5b wires it)"
+                .into(),
+        })
+    }
 }
 
 // CID:security-002 - SecretRef
@@ -182,7 +217,7 @@ impl Deref for UnsealedSecret {
 // kind mapping).
 // Used by: every method on `SecurityV1` (and, transitively, by
 // every adapter that calls those methods).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum SecurityErrorV1 {
     /// Boot-time: the `AFA_MASTER_KEY` env var was not set.
     #[error("master key missing from the environment")]
@@ -259,6 +294,70 @@ impl crate::error::AfaError for SecurityErrorV1 {
             // Bugs and invariant violations.
             Self::Internal { .. } => AfaErrorKind::Internal,
         }
+    }
+}
+
+// `From<Box<dyn Error + Send + Sync>>` so the engine can
+// pull a `SecurityErrorV1` back out of a
+// `StorageError::Closure` (the engine's `with_conn`
+// closures return `Result<T, SecurityErrorV1>`; the
+// `from` impl in `observability.rs` boxes the
+// `SecurityErrorV1` into `StorageError::Closure`; the
+// engine's call site does `.map_err(...)` to round-trip
+// the boxed error back to its own type). The downcast
+// uses `downcast_ref` (the `Box<dyn Error>` is a
+// type-erased `SecurityErrorV1`; if the downcast fails
+// the engine wraps it as `Internal` — that branch should
+// be unreachable in practice, since the only producer of
+// the `StorageError::Closure` is the engine's own
+// closures, which always box a `SecurityErrorV1`).
+//
+// **Doc drift correction #7 vs. the IMPL draft**: the
+// IMPL promised a one-line `From<Box<dyn Error>>` round-
+// trip; the actual implementation needs the downcast
+// because the boxed error is a concrete `SecurityErrorV1`,
+// not a string or a generic Error. The downcast failure
+// is the "I shipped a bug" path — a test in
+// `lookup_hash_roundtrip.rs` covers the happy path
+// (SecretNotFound, StorageCorrupted).
+impl From<Box<dyn std::error::Error + Send + Sync>> for SecurityErrorV1 {
+    fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
+        // Try to downcast to `SecurityErrorV1` first (the
+        // common case — the engine's own closure produced
+        // it). If the downcast succeeds, hand back the
+        // concrete error (preserves the variant —
+        // `SecretRotated` stays `SecretRotated`).
+        if let Some(sec) = e.downcast_ref::<SecurityErrorV1>() {
+            return sec.clone();
+        }
+        // The downcast failed: the boxed error is not a
+        // `SecurityErrorV1` (e.g. a `StorageError::Closure`
+        // produced by some future engine). Wrap as
+        // `Internal` with the `Debug` representation so
+        // the operator sees the original error string in
+        // the panic / log line.
+        SecurityErrorV1::Internal {
+            reason: format!("non-SecurityErrorV1 closure error: {:?}", e),
+        }
+    }
+}
+
+// `From<rusqlite::Error>` so the engine's `with_conn`
+// closure can `?` a `rusqlite::Error` directly
+// (e.g. `tx.query_row(...)?`) and have it auto-converted
+// to `StorageError::Migrate { version: 0, source: e }`
+// at the closure boundary, then boxed into
+// `StorageError::Closure` at the `with_conn` return
+// boundary, then round-tripped back to
+// `SecurityError::StorageCorrupted` at the engine's
+// call site. The `version: 0` placeholder is acceptable
+// here because the migration version is unknown to the
+// engine (the engine is reading/writing data, not
+// running migrations). The kernel's boot-time
+// migrations set the version explicitly.
+impl From<rusqlite::Error> for SecurityErrorV1 {
+    fn from(_: rusqlite::Error) -> Self {
+        SecurityErrorV1::StorageCorrupted
     }
 }
 

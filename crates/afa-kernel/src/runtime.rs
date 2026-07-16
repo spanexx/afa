@@ -231,11 +231,11 @@ mod tests {
     /// (dropping the `TempDir` would delete the file,
     /// which would race with the engine's open
     /// connection on slow filesystems).
-    fn fresh_kernel() -> (TempDir, Kernel) {
+    async fn fresh_kernel() -> (TempDir, Kernel) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("secrets.db");
         let key = MasterKey::from([0x42u8; 32]);
-        let kernel = Kernel::new(&key, path).expect("kernel::new");
+        let kernel = Kernel::new(&key, path).await.expect("kernel::new");
         (dir, kernel)
     }
 
@@ -247,7 +247,7 @@ mod tests {
         // `EventReceived` audit-trail fact whose
         // `correlation_id` matches the one returned to
         // the caller.
-        let (_dir, kernel) = fresh_kernel();
+        let (_dir, kernel) = fresh_kernel().await;
         let bus = kernel.event_bus();
         let mut received = bus.subscribe::<EventReceived>(16);
 
@@ -271,7 +271,7 @@ mod tests {
     async fn multiple_ingests_get_distinct_correlation_ids() {
         // Flow 2: correlation IDs are unique across
         // the whole process.
-        let (_dir, kernel) = fresh_kernel();
+        let (_dir, kernel) = fresh_kernel().await;
 
         let id_a = kernel
             .runtime()
@@ -308,7 +308,7 @@ mod tests {
         // round-trips through the `Display` impl as
         // a real UUID (8-4-4-4-12 hex shape, not
         // a placeholder string).
-        let (_dir, kernel) = fresh_kernel();
+        let (_dir, kernel) = fresh_kernel().await;
 
         let id_first = kernel
             .runtime()
@@ -376,7 +376,7 @@ mod tests {
         // event flows all the way through to a
         // registered step, and the step's published
         // `Ack` is delivered to a subscriber.
-        let (_dir, kernel) = fresh_kernel();
+        let (_dir, kernel) = fresh_kernel().await;
         let scheduler = kernel.scheduler();
         let bus = kernel.event_bus();
         let mut acks = bus.subscribe::<Ack>(16);
@@ -419,7 +419,7 @@ mod tests {
         // end-to-end form of the Scheduler panic
         // test — the panic must not propagate out
         // through the Runtime.
-        let (_dir, kernel) = fresh_kernel();
+        let (_dir, kernel) = fresh_kernel().await;
         let scheduler = kernel.scheduler();
         let bus = kernel.event_bus();
         let mut failed = bus.subscribe::<WorkflowStepFailed>(16);

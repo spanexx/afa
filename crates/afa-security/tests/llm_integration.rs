@@ -103,11 +103,11 @@ const LOOP_ITERATIONS: usize = 10;
 /// a fresh tempdir-backed `secrets.db`). The
 /// `TempDir` is returned so the test can keep
 /// the path alive for the test's entire scope.
-fn fresh_kernel() -> (TempDir, Kernel) {
+async fn fresh_kernel() -> (TempDir, Kernel) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("secrets.db");
     let key = MasterKey::from([0x42u8; 32]);
-    let kernel = Kernel::new(&key, path).expect("kernel::new");
+    let kernel = Kernel::new(&key, path).await.expect("kernel::new");
     (dir, kernel)
 }
 
@@ -158,7 +158,7 @@ async fn the_kernel_seals_unseals_and_uses_a_secret_in_a_bearer_auth_loop() {
     //    by `seal` is the "receipt" the engine
     //    hands back — the loop uses it on every
     //    iteration to look the secret up.
-    let (_dir, kernel) = fresh_kernel();
+    let (_dir, kernel) = fresh_kernel().await;
     let security = kernel.security();
     let bus = kernel.event_bus();
     let secret_ref = security
@@ -382,7 +382,7 @@ async fn a_request_with_the_wrong_bearer_token_is_rejected_by_the_mock_server() 
         .mount(&server)
         .await;
 
-    let (_dir, kernel) = fresh_kernel();
+    let (_dir, kernel) = fresh_kernel().await;
     let secret_ref = kernel
         .security()
         .seal(b"sk-test-aaaa", "llm-wrong-key-test")

@@ -38,7 +38,7 @@ use tokio::time::timeout;
 
 #[tokio::test]
 async fn rotate_invalidates_old_version() {
-    let (_dir, _bus, engine) = common::new_engine_with_bus();
+    let (_dir, _bus, engine) = common::new_engine_with_bus().await;
 
     // 1. Seal the first version.
     let v1 = engine
@@ -123,7 +123,7 @@ async fn unseal_for_a_nonexistent_version_returns_secret_not_found() {
     // caller with a typo'd version number think their
     // secret is intact when it has actually been
     // rotated.
-    let (_dir, _bus, engine) = common::new_engine_with_bus();
+    let (_dir, _bus, engine) = common::new_engine_with_bus().await;
 
     // No seal at all — the `(openai-api-key, 1)` row
     // does not exist.

@@ -148,11 +148,11 @@ data: [DONE]
 /// the `TempDir` would delete the file, which would
 /// race with the engine's open connection on slow
 /// filesystems).
-fn fresh_kernel() -> (TempDir, Kernel) {
+async fn fresh_kernel() -> (TempDir, Kernel) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("secrets.db");
     let key = MasterKey::from([0x42u8; 32]);
-    let kernel = Kernel::new(&key, path).expect("kernel::new");
+    let kernel = Kernel::new(&key, path).await.expect("kernel::new");
     (dir, kernel)
 }
 
@@ -209,7 +209,7 @@ async fn kernel_end_to_end_round_trip_buffers_response_and_publishes_audit_pair(
     // 1. Bring up a real Kernel (real
     //    SecurityEngine, real bus, real
     //    CapabilityRegistry).
-    let (_dir, kernel) = fresh_kernel();
+    let (_dir, kernel) = fresh_kernel().await;
     // 2. Stand up a wiremock-rs server that
     //    returns the canned `TEXT_REPLY_BODY`
     //    for any POST to `/v1/responses`.
@@ -334,7 +334,7 @@ async fn kernel_end_to_end_streaming_chunk_ordering() {
     // (`TextDelta` then `Finished`) and
     // that the bus saw the matching pair
     // of audit events.
-    let (_dir, kernel) = fresh_kernel();
+    let (_dir, kernel) = fresh_kernel().await;
     let server = MockServer::start().await;
     // The OpenAI Responses adapter does NOT
     // set an `Accept: text/event-stream`
@@ -419,7 +419,7 @@ async fn kernel_register_llm_twice_returns_lm_already_registered() {
     // `RegisterError::LlmAlreadyRegistered`,
     // not a panic, so a buggy bootstrap
     // fails loudly but cleanly.
-    let (_dir, kernel) = fresh_kernel();
+    let (_dir, kernel) = fresh_kernel().await;
     let adapter1: Arc<dyn LlmV1> = Arc::new(ResponsesAdapter::new(
         config_for(
             "http://127.0.0.1:1",
@@ -474,7 +474,7 @@ async fn kernel_llm_returns_none_before_registration() {
     // error rather than a confusing
     // deref-of-None deep in the call
     // stack.
-    let (_dir, kernel) = fresh_kernel();
+    let (_dir, kernel) = fresh_kernel().await;
     assert!(
         kernel.llm().is_none(),
         "kernel.llm() should return None before any register_llm call"

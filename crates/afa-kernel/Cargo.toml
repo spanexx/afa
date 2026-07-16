@@ -91,3 +91,16 @@ afa-plugin-knowledge-json = { path = "../afa-plugin-knowledge-json" }
 # shape check that would catch a `Display` impl that
 # emitted a placeholder string instead of a real UUID).
 uuid = "1"
+# Used by the in-crate `Kernel::new` boot-failure tests
+# in `src/kernel.rs` (the two CID:kernel-002 and
+# CID:kernel-003 tests added in Phase 0.5b). The tests
+# build a tampered SQLite file (a `secrets.db` with a
+# wrong `schema_version`, or a `secrets.db` whose
+# parent is a regular file) and assert that
+# `Kernel::new` rejects it with the right domain-level
+# `SecurityErrorV1` variant. The kernel does NOT use
+# `rusqlite` in production code (the engine does, the
+# kernel just owns the boot path); the dep is
+# `dev-dependencies`-only to keep the production
+# binary free of the SQLite C bindings.
+rusqlite = { version = "0.31", features = ["bundled"] }
