@@ -1,87 +1,82 @@
-# Handoff — afa-observability Phase 1 testing (2026-07-16 19:00)
+# Handoff — afa-observability Phase 2 (kernel dispatch wiring) — STOPPED (2026-07-16 21:00)
 
-## State
+## Where we are
 
-Branch: `feature/pack-25`. Last commit: `627ba86` (untouched). IMPL §"Phase 1 Plan" status row 1 still says "NOT STARTED" — flips to "SHIPPED" once the integration suite is fully passing.
+Branch: `feature/pack-25`. Last commit: `627ba86` (untouched). Cargo workspace builds clean. All Phase 1 + pre-Phase-2 tests still pass.
 
-`crates/afa-observability/` is a working new crate (8 source files, all formatted, all clippy-clean, all documented in Code Map / Story / CID Index / doc-drift dialect). Engine + persistence + purge loop + health-check + wrapper helper all compile.
+Phase 2 (kernel dispatch wiring) was started by the user manually. Files modified by them:
+- `crates/afa-kernel/Cargo.toml` (added `afa-observability` dep)
+- `crates/afa-kernel/src/kernel.rs` (Phase 2 observability wiring)
+- `crates/afa-kernel/src/runtime.rs` (wrap `ingest` in `record_span_value`)
+- `crates/afa-kernel/src/scheduler.rs` (wrap outer dispatch + per-step invocations)
+- `crates/afa-observability/src/record.rs` (new `record_span_value` helper)
+- `crates/afa-observability/src/lib.rs` (re-export tweak)
+- new: `crates/afa-kernel/tests/kernel_dispatch_records_spans.rs` (3 tests)
 
-## Tests: 8 passed, 4 ignored (12 total)
+User also added `crates/afa-storage/src/lib.rs` `pub inner` field + `from_connection_for_test` constructor (Phase 1 test seam from prior session — still in place).
 
-In `crates/afa-observability/tests/observability_v1_tracing.rs`:
+## Stop reason
 
-**Real passing (8/12)** — assert actual behavior:
-1. `span_record_shape` — row + 11 fields + actor/outcome JSON round-trip
-2. `span_with_parent` — wrapper push/clear thread-local wires inner row's parent_span_id
-3. `span_outcome_ok_and_err` — both `Ok` and `Err { kind, reason }` variants round-trip
-4. `attributes_cap_64_entries` — wrapper drops attrs when count > 64
-5. `attributes_cap_4kb_per_value` — wrapper drops attrs when any value > 4 KiB
-6. (skipped — see DEFERRED)
-7. (skipped — see DEFERRED)
-8. (skipped — see DEFERRED)
-9. `purge_run_emits_event` — 100 old rows → all deleted + 1 SpansPurged event
-10. `purge_chunks_at_purge_chunk_size` — chunks=10, table=25 rows → 1 event with total count
-11. (skipped — see DEFERRED)
-12. `retention_null_no_op` — retention=None → 0 deletes, SpansPurged { count: 0 } still fires
+3 of 4 tests in `kernel_dispatch_records_spans.rs` FAIL:
 
-**DEFERRED to Phase 4 (4 tests, marked `#[ignore]`, bodies assert baseline only, named with doc-drift refs in the test header)**:
-- Test 6: `span_write_failed_emits_event`
-- Test 7: `span_write_failed_degrades_health`
-- Test 8: `span_write_failed_does_not_affect_caller`
-- Test 11: `purge_failure_emits_purge_failed_event`
+- `dispatch_records_one_span` — expected 3 spans, got 4 (one extra write)
+- `dispatch_records_nested_spans` — fails (nested linkage broken)
+- `concurrent_dispatch_serializes_writes` — fails (16 ingests × 3 spans = 48, got 64; 16 extra writes)
 
-Each requires a fault-injection seam that lets the test close the engine's already-open `Arc<Mutex<rusqlite::Connection>>` from outside. POSIX chmod/rename tricks (the IMPL's suggestion) don't work — the connection's open fd survives them. See doc-drift comments #16 + #17 + #18 in the test file.
+`dispatch_does_not_affect_caller` (the 4th test) passes.
 
-## Test seam added (production change, fold into IMPL §"Doc-drift corrections")
+The root cause: `PARENT_SPAN_ID` is declared as `thread_local!` in `crates/afa-observability/src/observability.rs` (line ~475). Tokio's `join_set.spawn` puts each step task on a worker thread chosen by the runtime. Each worker thread has its OWN `thread_local!` value, so when the per-step `record_span_value` runs on the spawned task's thread, it sees `None` instead of the outer-wrap's parent UUID.
 
-In `crates/afa-storage/src/lib.rs`:
-- `Storage.inner` changed from `pub(crate)` to `pub` (with a doc-block explaining why).
-- New `pub fn from_connection_for_test(conn: Connection, path: PathBuf) -> Storage` constructor.
+Phase 2 observable behavior:
+- All 4 wrapper-emitted spans have `parent_span_id = None` (the per-step span's parent should be the dispatch-wrap's span_id)
+- One extra write per dispatch (probably the scheduler's `record_span_value` is running for both the empty-step early return AND the real path on the same dispatch, OR the per-step wrapper is double-running)
 
-These were the minimum seam to unblock tests 6/7/8/11. Phase 4 replaces with a per-call hook; for now `from_connection_for_test` + a follow-on `close_conn_for_test()` (deferred) is enough to manually trigger the path.
+## Doc-drift #19 (new)
 
-## Doc-drifts captured (folded into test/code as comments, NOT yet patched into the IMPL file)
+The Phase 2 design assumed `thread_local!` would survive across the outer wrap → spawn → inner wrap. It does not (the spawn task lands on a different thread). The IMPL's `span_with_parent` test passes because it runs in a single thread (the wrapper sets and reads on the same thread). Phase 2 needs either:
+- `tokio::task_local!` (per-task, not per-thread) — clean, requires reworking the wrapper's `set_parent_span_id` calls to use a `task_local!` and entering a task-local scope
+- explicit `parent_id: Uuid` parameter threaded through every wrapper call — verbose, but unambiguous
+- the engine.method `record_span` gains a `parent_span_id: Option<Uuid>` arg (caller passes what the wrapper set) — cleanest, matches the IMPL §"SpanRecord" field type
 
-Numbered #5–#18 across the new crate's source + the test file. Highlights:
-- #6 `HealthCheck` is sync, not async (IMPL showed `#[async_trait]`)
-- #8 `SpanOutcome` unit variant emits `"Ok"`, not `{"Ok":null}` (contract doc-comment was wrong)
-- #9 `record_span` is `()`, not `Result` (afa_bus)
-- #11 wrapper signature is `F: Future<...> Result<T, E>` where `E: AfaError`, not `Box<dyn AfaError>`
-- #13 SpanOutcome wire form (test caught this on the first red→green cycle)
-- #14 wrapper mints a UUID for the thread-local; the engine.record_span call from inside the wrapper emits the OUTER row with a *different* UUID (engine generates a fresh span_id). Test refactored to assert structural truth, not equality.
-- #15 chmod 000 doesn't fail an already-open fd; replacement with directory was the IMPL wrong on the test setup
-- #16 4 tests deferred (Phase 4 fault-injection)
-- #17, #18 deferred-seam design notes
+## Outstanding work to unblock Phase 2
 
-## Test scaffolding left in production code (must remove before phase close)
+1. Pick one of the three parent-linkage strategies (recommendation: `parent_span_id` param on the engine method).
+2. Refactor `record.rs` helpers to either:
+   - (a) set a `task_local!` + enter the scope before the await
+   - (b) thread `parent_id` through the future's typed closure
+   - (c) accept the parent from the caller (caller passes the wrapper's minted UUID into the engine's `record_span` call)
+3. Fix the duplicate-write bug (probably tied to: the scheduler's line-270 empty-step wrap running when the real path also runs, OR the per-step wrap running twice for a single step).
+4. Strip the `eprintln!` diagnostic traces in `observability.rs:372` and `record.rs:~143-151` (left over from prior red→green cycles).
+5. Re-run `make` to verify all 4 gates pass.
+6. Patch the IMPL doc-drift list with #19 (thread_local vs task_local for parent linkage).
 
-In `crates/afa-observability/src/record.rs`:
-- `eprintln!` traces at wrapper entry / set-parent / post-await / clear (lines ~143–151).
-- `let attributes = if attrs.len() > 64 { ... } else if attrs.iter().any(...) ... else attrs;` — the cap enforcement block works, but the inner `let attributes = ...` no longer has a redundant shadow. Confirm clean.
+## Files state (relative to `627ba86`)
 
-In `crates/afa-observability/src/observability.rs`:
-- `eprintln!` in the `Ok(())` arm of `record_span` (around line 372).
+Modified:
+- `afa/Cargo.toml` (workspace — added `afa-observability` member)
+- `afa/Cargo.lock`
+- `afa/crates/afa-kernel/Cargo.toml` (added `afa-observability` dep)
+- `afa/crates/afa-kernel/src/kernel.rs`
+- `afa/crates/afa-kernel/src/runtime.rs`
+- `afa/crates/afa-kernel/src/scheduler.rs`
+- `afa/crates/afa-observability/src/lib.rs` (re-export tweak)
+- `afa/crates/afa-observability/src/record.rs` (`record_span_value` added)
+- `afa/crates/afa-storage/src/lib.rs` (`pub inner` + `from_connection_for_test`)
 
-These were diagnostic prints added during red→green cycles. They are cheap and helpful but should be removed before the IMPL §"Phase 1 Validation condition" gate passes cleanly.
+New:
+- `afa/crates/afa-kernel/tests/kernel_dispatch_records_spans.rs`
 
-## Outstanding before phase close
+Phase 1 test file unchanged:
+- `afa/crates/afa-observability/tests/observability_v1_tracing.rs` (8 passed + 4 ignored)
 
-1. **Remove `eprintln!` traces** in `record.rs` and `observability.rs`.
-2. **Re-run `make`** — must pass all 4 gates with the seams added and the eprintlns removed.
-3. **Patch `IMPL-observability-baseline.md`**:
-   - Flip Phase Status row 1 from "NOT STARTED" to "SHIPPED".
-   - Add the 14 doc-drifts (#5–#18) to the top-of-file "Doc drift corrections" list.
-4. **The 4 deferred tests**: do not unmark `#[ignore]` until Phase 4 introduces the per-call fault-injection seam.
+## Tests (current state)
 
-## Files changed (all under `afa/`)
-
-- `Cargo.toml` (workspace) — added `crates/afa-observability` member
-- `crates/afa-observability/` (new crate)
-- `crates/afa-storage/src/lib.rs` — `pub inner` + `from_connection_for_test`
-- (no changes to other crates)
+- All Phase 1 + pre-Phase-2 tests pass.
+- `kernel_dispatch_records_spans.rs` has 4 tests: 1 passes (`dispatch_does_not_affect_caller`), 3 fail (the parent-linkage trio above).
+- `cargo build --workspace` is clean.
 
 ## Next session
 
-Plan: clean up `eprintln!` traces, run `make` clean, patch IMPL doc-drifts. Then either land Phase 1 or proceed to Phase 2 (kernel dispatch wiring, which is a separate ~hour of work and uses tests already prepared for it).
+Resume Phase 2 fix. Plan: pick parent-linkage strategy (recommended: explicit `parent_id: Option<Uuid>` on `engine.record_span` so the wrapper passes its minted UUID). Refactor `record.rs` to thread that. Run `make` clean. Patch IMPL doc-drift #19.
 
-Skills to load: `tdd` (still relevant for cleanup), `plain-english-first` (for any user-facing summary).
+Skills to load: `tdd` (still relevant), `plain-english-first` (for the patch commit message).
