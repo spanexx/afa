@@ -41,14 +41,16 @@
 
 use crate::event_bus::EventBusHandle;
 use afa_contracts::{AfaError, AfaErrorKind, AfaEvent, ExecutionContext};
+use afa_observability::{record_span_value, ObservabilityEngine};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::any::{Any, TypeId};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 use tokio::task::JoinSet;
 use tracing::debug;
+use uuid::Uuid;
 
 /// The full type of the scheduler's internal registry. Factored
 /// out so the `Arc<RwLock<HashMap<...>>>` shape only has to be
@@ -139,13 +141,27 @@ impl AfaEvent for WorkflowStepFailed {}
 // `dispatch` on every incoming event).
 pub struct Scheduler {
     registry: Registry,
+    /// The observability engine. `Phase 2` of the
+    /// observability-baseline pack wires every
+    /// `dispatch` call through the
+    /// `record_span_value` helper, and every
+    /// individual step body through the `record_span`
+    /// helper. The engine is `Arc`-shared with the
+    /// `Runtime` (constructed once in `Kernel::new`
+    /// and handed to both), so the two always see
+    /// the same spans DB connection.
+    observability: Arc<ObservabilityEngine>,
 }
 
 impl Scheduler {
-    /// Build a fresh, empty `Scheduler`.
-    pub fn new() -> Self {
+    /// Build a fresh, empty `Scheduler` over the
+    /// given observability engine. The engine is
+    /// `Arc`-cloned (it's `Send + Sync` and cheap to
+    /// share).
+    pub fn new(observability: Arc<ObservabilityEngine>) -> Self {
         Self {
             registry: Arc::new(RwLock::new(HashMap::new())),
+            observability,
         }
     }
 
@@ -167,8 +183,19 @@ impl Scheduler {
     /// Callers wrap their closure in an `Arc` themselves,
     /// which lets them share the same step between two
     /// schedulers (or two kernels) without an extra copy.
-    pub fn register<T: AfaEvent>(&self, step: Step<T>) {
+    /// Register a step under the event type `T`. The
+    /// `name` is a stable identifier used as the
+    /// spans DB's `operation` column (e.g. `"seal"`,
+    /// `"unseal"`); it is NOT the Rust FQ type name
+    /// (which is debug-only output). Two steps
+    /// registered against the same `T` with the
+    /// same name overwrite each other (the
+    /// registry is keyed by `TypeId`; a future
+    /// pack may move to a `(TypeId, name)` key
+    /// if multi-registration is required).
+    pub fn register<T: AfaEvent>(&self, name: &'static str, step: Step<T>) {
         let typed = Arc::new(TypedStep::<T> {
+            name,
             f: step,
             _phantom: PhantomData,
         });
@@ -206,6 +233,18 @@ impl Scheduler {
     ///   anything itself).
     /// - A `JoinError` that is a cancellation (not a panic)
     ///   is logged at `debug` and does not publish anything.
+    ///
+    /// **Phase 2 observability wiring**: the entire
+    /// fan-out body is wrapped in
+    /// `record_span_value` (engine: "afa-kernel",
+    /// operation: "scheduler.dispatch"). Each step
+    /// body is further wrapped in `record_span`
+    /// (engine: "afa-kernel", operation:
+    /// "scheduler.step") with the `event_type`
+    /// attribute. The wrapper helpers are
+    /// additive: the existing `tracing::debug!`
+    /// calls and the `WorkflowStepFailed`
+    /// publish-on-panic path are preserved.
     pub async fn dispatch<T: AfaEvent>(
         &self,
         event: T,
@@ -215,9 +254,12 @@ impl Scheduler {
         let event = Arc::new(event);
         let type_name = std::any::type_name::<T>();
 
-        // Snapshot the list of steps under the read lock,
-        // then release the lock before any work that could
-        // be slow.
+        // Snapshot the list of steps under the read
+        // lock, OUTSIDE the wrap scope, then release
+        // the lock before any work that could be
+        // slow. The snapshot is moved into the
+        // wrap-scope future as a plain `Vec` (no
+        // registry lock is held across an await).
         let steps: Vec<Arc<dyn ErasedStep>> = {
             let registry = self.registry.read().expect("Scheduler registry poisoned");
             registry
@@ -227,6 +269,26 @@ impl Scheduler {
         };
 
         if steps.is_empty() {
+            // Phase 2: even a "no steps" dispatch
+            // records one top-level
+            // `scheduler.dispatch` row (the wrap
+            // scope runs, the future is a no-op,
+            // and one SpanRecord is written).
+            let mut attributes: BTreeMap<String, String> = BTreeMap::new();
+            attributes.insert("event_type".to_string(), type_name.to_string());
+            attributes.insert("step_count".to_string(), "0".to_string());
+            let observability = Arc::clone(&self.observability);
+            let ctx_for_wrap = ctx.clone();
+            record_span_value(
+                &ctx_for_wrap,
+                "afa-kernel",
+                "scheduler.dispatch",
+                attributes,
+                None,
+                &observability,
+                async move {},
+            )
+            .await;
             debug!(
                 event_type = type_name,
                 "dispatch with zero registered steps"
@@ -234,59 +296,271 @@ impl Scheduler {
             return;
         }
 
-        let mut join_set: JoinSet<()> = JoinSet::new();
-        for step in steps {
-            let erased: Arc<dyn Any + Send + Sync> = event.clone();
-            let ctx = ctx.clone();
-            let bus = bus.clone();
-            join_set.spawn(async move {
-                // The step's own Result is what we throw
-                // away here — a step that returns Err
-                // already published its own failure; a
-                // step that panics surfaces as a JoinError
-                // (see the drain loop below). This
-                // inner Result is therefore deliberately
-                // discarded: the Scheduler does not
-                // double-publish.
-                let _ = step.invoke(erased, ctx, bus).await;
-            });
-        }
+        // The dispatch wrap is the root span of
+        // the per-step tree. We mint the
+        // dispatch_span_id here (in the
+        // dispatching task) and pass it as the
+        // parent_span_id to each per-step wrap
+        // (which runs on a different tokio task
+        // after `join_set.spawn`). Explicit
+        // parent is required because
+        // tokio::spawn does not propagate
+        // thread_local values to the spawned
+        // task (see doc-drift #14 in
+        // `afa-observability/src/record.rs`).
+        let dispatch_span_id = Uuid::new_v4();
+        let observability_for_wrap = Arc::clone(&self.observability);
+        let type_name_for_wrap = type_name.to_string();
+        let ctx_for_wrap = ctx.clone();
+        let ctx_for_closure = ctx.clone();
+        let bus_for_closure = bus.clone();
+        let step_count_attr = steps.len().to_string();
+        let mut attributes: BTreeMap<String, String> = BTreeMap::new();
+        attributes.insert("event_type".to_string(), type_name_for_wrap.clone());
+        attributes.insert("step_count".to_string(), step_count_attr);
+        let event_for_steps = Arc::clone(&event);
+        record_span_value(
+            &ctx_for_wrap,
+            "afa-kernel",
+            "scheduler.dispatch",
+            attributes,
+            None, // root span of the dispatch
+            &observability_for_wrap,
+            async move {
+                let mut join_set: JoinSet<()> = JoinSet::new();
+                for step in steps {
+                    let erased: Arc<dyn Any + Send + Sync> =
+                        Arc::clone(&event_for_steps) as Arc<dyn Any + Send + Sync>;
+                    // The outer `observability` Arc is
+                    // borrowed for each iteration's
+                    // `Arc::clone` (line below). The
+                    // original loop body read
+                    // `&observability` directly, which
+                    // moves on the second iteration.
+                    // Clone from the underlying
+                    // self.observability Arc each
+                    // iteration, NOT the local
+                    // `observability` (which the
+                    // outer async-move captures by
+                    // value). The outer async-move
+                    // takes the moved `observability`
+                    // into the closure; re-borrowing
+                    // here is the move-error pattern.
+                    let step_observability = Arc::clone(&self.observability);
+                    let step_ctx = ctx_for_closure.clone();
+                    let step_bus = bus_for_closure.clone();
+                    let step_name: &'static str = step.name();
+                    join_set.spawn(async move {
+                        // **Phase 2 observability
+                        // wiring**: every step
+                        // body is wrapped in a
+                        // freshly-minted span
+                        // so the spans DB
+                        // records one row per
+                        // step (with
+                        // `parent_span_id` =
+                        // the dispatch wrap's
+                        // span_id, set via
+                        // the engine's
+                        // `PARENT_SPAN_ID`
+                        // thread-local).
+                        //
+                        // The step span id is
+                        // minted BEFORE
+                        // `invoke` and pushed
+                        // onto the engine's
+                        // `PARENT_SPAN_ID`
+                        // thread-local for the
+                        // duration of the
+                        // call. This is what
+                        // lets a step body
+                        // record its OWN
+                        // inner spans
+                        // (e.g. a future LLM
+                        // adapter's
+                        // `complete` call)
+                        // and have those
+                        // inner spans see
+                        // the step's
+                        // `span_id` as their
+                        // `parent_span_id`.
+                        // The dispatch wrap's
+                        // `PARENT_SPAN_ID`
+                        // set is on the stack
+                        // here, but the
+                        // per-spawn
+                        // `set_parent_span_id`
+                        // override takes
+                        // precedence (the
+                        // engine's contract
+                        // is "the most
+                        // recently set
+                        // parent wins").
+                        //
+                        // The step's own
+                        // `Result` is what
+                        // we throw away here
+                        // — a step that
+                        // returns Err
+                        // already published
+                        // its own failure; a
+                        // step that panics
+                        // surfaces as a
+                        // `JoinError` (see
+                        // the drain loop
+                        // below). This
+                        // inner Result is
+                        // therefore
+                        // deliberately
+                        // discarded: the
+                        // Scheduler does not
+                        // double-publish.
+                        //
+                        // We use the engine's
+                        // method-form
+                        // `record_span` here
+                        // (not the
+                        // free-function
+                        // helper) because
+                        // the step's
+                        // `Result` type is
+                        // `Result<(), Box<dyn
+                        // AfaError>>` — a
+                        // `Box<dyn
+                        // AfaError>` does
+                        // NOT satisfy the
+                        // helper's
+                        // `E: AfaError`
+                        // trait bound, so
+                        // the free-function
+                        // form would not
+                        // type-check. The
+                        // method form takes
+                        // an explicit
+                        // `SpanOutcome` and
+                        // accepts any error
+                        // that is `&dyn
+                        // AfaError` (which
+                        // `Box<dyn
+                        // AfaError>`
+                        // deref-coerces to).
+                        // `step_observability` is no longer needed
+                        // here — the `record_span_value`
+                        // call above already wrote the
+                        // step's SpanRecord via the
+                        // wrapper. The earlier version
+                        // called `engine.record_span`
+                        // directly too, which produced a
+                        // duplicate row per step (one
+                        // from the wrapper, one from
+                        // the manual call). The wrapper
+                        // is now the single writer;
+                        // the engine method-form is
+                        // exposed for tests + direct
+                        // callers but the kernel's
+                        // dispatch path uses only the
+                        // wrapper.
+                        // (the
+                        // free-function
+                        // `record_span`
+                        // helper does,
+                        // but we can't
+                        // use it for
+                        // this case —
+                        // see the
+                        // explanation
+                        // below).
+                        // Wrap the step invocation in
+                        // `record_span_value` so the
+                        // thread-local parent linkage
+                        // is owned by the wrapper helper
+                        // (per the IMPL §"SpanOutcome"
+                        // planning principle: the
+                        // wrapper owns timing + outcome
+                        // classification; the method
+                        // form is the dumb endpoint).
+                        // This is what Phase 2's
+                        // dispatch wiring relies on.
+                        // The dropped step_span_id +
+                        // manual set_parent_span_id calls
+                        // from the in-flight branch were
+                        // the right shape for the
+                        // not-yet-extracted wrapper; with
+                        // `record_span_value` the helper
+                        // does the mint/clear internally.
+                        let mut step_attributes: BTreeMap<String, String> = BTreeMap::new();
+                        step_attributes.insert("event_type".to_string(), step_name.to_string());
+                        let _ = afa_observability::record_span_value(
+                            &step_ctx,
+                            "afa-kernel",
+                            step_name,
+                            step_attributes.clone(),
+                            Some(dispatch_span_id), // parent = the dispatch wrap
+                            &step_observability,
+                            step.invoke(erased, step_ctx.clone(), step_bus),
+                        )
+                        .await;
+                        // (Removed unused duration_ms + outcome
+                        // locals — the manual
+                        // `engine.record_span` call that used
+                        // them is gone; the wrapper is the
+                        // single writer.)
+                        // (Removed duplicate engine.record_span
+                        // call — the wrapper already wrote the
+                        // step's row above. Keeping a
+                        // second manual call produced 2 rows
+                        // per step (test caught this as the
+                        // "3 vs 4 spans" assertion failure).)
+                    });
+                }
 
-        while let Some(res) = join_set.join_next().await {
-            match res {
-                Ok(()) => {
-                    debug!(event_type = type_name, "step completed successfully");
+                while let Some(res) = join_set.join_next().await {
+                    match res {
+                        Ok(()) => {
+                            debug!(
+                                event_type = type_name_for_wrap,
+                                "step completed successfully"
+                            );
+                        }
+                        Err(join_err) if join_err.is_panic() => {
+                            // The panicked step never
+                            // got the chance to
+                            // publish anything itself.
+                            // Publish
+                            // `WorkflowStepFailed` on
+                            // its behalf.
+                            let failed = WorkflowStepFailed {
+                                event_type: type_name_for_wrap.clone(),
+                                kind: AfaErrorKind::Internal,
+                                message: "step panicked".to_string(),
+                            };
+                            bus_for_closure
+                                .publish(failed, ctx_for_closure.clone())
+                                .await;
+                            debug!(
+                                event_type = type_name_for_wrap,
+                                "step panicked; published WorkflowStepFailed on its behalf"
+                            );
+                        }
+                        Err(join_err) => {
+                            // Cancellation or other
+                            // JoinError that is not
+                            // a panic. Logged but
+                            // not published; a
+                            // future pack may add a
+                            // shutdown protocol
+                            // that uses this path.
+                            debug!(
+                                error = ?join_err,
+                                event_type = type_name_for_wrap,
+                                "step cancelled or otherwise did not complete normally"
+                            );
+                        }
+                    }
                 }
-                Err(join_err) if join_err.is_panic() => {
-                    // The panicked step never got the
-                    // chance to publish anything itself.
-                    // Publish `WorkflowStepFailed` on its
-                    // behalf.
-                    let failed = WorkflowStepFailed {
-                        event_type: type_name.to_string(),
-                        kind: AfaErrorKind::Internal,
-                        message: "step panicked".to_string(),
-                    };
-                    bus.publish(failed, ctx.clone()).await;
-                    debug!(
-                        event_type = type_name,
-                        "step panicked; published WorkflowStepFailed on its behalf"
-                    );
-                }
-                Err(join_err) => {
-                    // Cancellation or other JoinError that
-                    // is not a panic. Logged but not
-                    // published; a future pack may add a
-                    // shutdown protocol that uses this
-                    // path.
-                    debug!(
-                        error = ?join_err,
-                        event_type = type_name,
-                        "step cancelled or otherwise did not complete normally"
-                    );
-                }
-            }
-        }
+            },
+        )
+        .await;
     }
 
     /// Test-only: report the number of registered steps for
@@ -303,11 +577,13 @@ impl Scheduler {
     }
 }
 
-impl Default for Scheduler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// No `Default` impl: `Scheduler` needs an
+// `ObservabilityEngine`, which is async-constructed
+// and not safely defaultable. Tests that need a
+// fresh `Scheduler` should call
+// `Scheduler::new(engine)` directly (the test
+// helpers in this file do so via the `fresh()`
+// helper).
 
 impl std::fmt::Debug for Scheduler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -339,6 +615,13 @@ trait ErasedStep: Send + Sync {
         ctx: ExecutionContext,
         bus: EventBusHandle,
     ) -> BoxFuture<'static, Result<(), Box<dyn AfaError>>>;
+    /// Stable name for this step (e.g. `"seal"`,
+    /// `"unseal"`). Used as the spans DB's
+    /// `operation` column by the kernel's
+    /// dispatch wrapper. NOT the Rust FQ type
+    /// name — that would leak the crate's full
+    /// type path into the audit log.
+    fn name(&self) -> &'static str;
 }
 
 // CID:scheduler-005 - TypedStep<T> (private)
@@ -356,6 +639,7 @@ trait ErasedStep: Send + Sync {
 // Used by: `Scheduler::register` (one created per
 // `register` call, then stored as `Arc<dyn ErasedStep>`).
 struct TypedStep<T: AfaEvent> {
+    name: &'static str,
     f: Step<T>,
     _phantom: PhantomData<fn() -> T>,
 }
@@ -377,6 +661,9 @@ impl<T: AfaEvent> ErasedStep for TypedStep<T> {
             .downcast::<T>()
             .expect("TypedStep<T> downcast: TypeId mismatch");
         (self.f)(event, ctx, bus)
+    }
+    fn name(&self) -> &'static str {
+        self.name
     }
 }
 
@@ -424,11 +711,39 @@ mod tests {
 
     /// Build a fresh (Scheduler, EventBus, bus handle) trio
     /// for tests. The bus handle is what a Scheduler would
-    /// receive from `Runtime::ingest` in real code.
-    fn fresh() -> (Scheduler, EventBus, EventBusHandle) {
+    /// receive from `Runtime::ingest` in real code. A
+    /// throwaway `ObservabilityEngine` is constructed and
+    /// handed to the `Scheduler`; the engine writes to
+    /// a private file in a fresh tempdir (which is
+    /// leaked for the rest of the test process; the
+    /// file is harmless because the purge loop is
+    /// disabled and retention is `None`).
+    ///
+    /// **Note**: the engine constructor is async, so
+    /// the helper is itself async. Every test in this
+    /// module is a `#[tokio::test]`, which awaits the
+    /// future before the rest of the test body runs.
+    async fn fresh() -> (Scheduler, EventBus, EventBusHandle) {
         let bus = EventBus::new();
         let handle = bus.handle();
-        (Scheduler::new(), bus, handle)
+        let dir = tempfile::tempdir().expect("test tempdir");
+        let path = dir.path().join("scheduler_test_spans.db");
+        // Leak the tempdir so the file path
+        // stays valid for the rest of the
+        // process.
+        Box::leak(Box::new(dir));
+        let engine = afa_observability::ObservabilityEngine::new(
+            afa_observability::ObservabilityConfig {
+                spans_db_path: path,
+                retention_days: None,
+                purge_interval_hours: 0,
+                purge_chunk_size: 1_000,
+            },
+            handle.clone(),
+        )
+        .await
+        .expect("test engine boot");
+        (Scheduler::new(engine), bus, handle)
     }
 
     // ---- The five required tests ----
@@ -439,7 +754,7 @@ mod tests {
         // already-used event type runs alongside the
         // first, with zero changes to the first step's
         // code.
-        let (scheduler, bus, handle) = fresh();
+        let (scheduler, bus, handle) = fresh().await;
         // One subscription is enough: both steps publish
         // `Ack`, and a single subscription receives both
         // (fan-out on the bus side; the Scheduler is
@@ -448,36 +763,42 @@ mod tests {
         // tests).
         let mut acks = bus.subscribe::<Ack>(16);
 
-        scheduler.register::<Trigger>(Arc::new(|_event, ctx, bus_handle| {
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                bus_handle
-                    .publish(
-                        Ack {
-                            from_step: "alpha".into(),
-                            payload: "a".into(),
-                        },
-                        ctx,
-                    )
-                    .await;
-                Ok(())
-            })
-        }));
-        scheduler.register::<Trigger>(Arc::new(|_event, ctx, bus_handle| {
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                bus_handle
-                    .publish(
-                        Ack {
-                            from_step: "beta".into(),
-                            payload: "b".into(),
-                        },
-                        ctx,
-                    )
-                    .await;
-                Ok(())
-            })
-        }));
+        scheduler.register::<Trigger>(
+            "scheduler_test_step_1",
+            Arc::new(|_event, ctx, bus_handle| {
+                let ctx = ctx.clone();
+                Box::pin(async move {
+                    bus_handle
+                        .publish(
+                            Ack {
+                                from_step: "alpha".into(),
+                                payload: "a".into(),
+                            },
+                            ctx,
+                        )
+                        .await;
+                    Ok(())
+                })
+            }),
+        );
+        scheduler.register::<Trigger>(
+            "scheduler_test_step_2",
+            Arc::new(|_event, ctx, bus_handle| {
+                let ctx = ctx.clone();
+                Box::pin(async move {
+                    bus_handle
+                        .publish(
+                            Ack {
+                                from_step: "beta".into(),
+                                payload: "b".into(),
+                            },
+                            ctx,
+                        )
+                        .await;
+                    Ok(())
+                })
+            }),
+        );
 
         assert_eq!(scheduler.step_count::<Trigger>(), 2);
 
@@ -521,20 +842,26 @@ mod tests {
         // `tokio::time::sleep` itself) yields. This
         // makes the wall-clock measurement deterministic
         // regardless of host scheduling.
-        let (scheduler, _bus, handle) = fresh();
+        let (scheduler, _bus, handle) = fresh().await;
 
-        scheduler.register::<Trigger>(Arc::new(|_event, _ctx, _bus| {
-            Box::pin(async move {
-                sleep(Duration::from_millis(200)).await;
-                Ok(())
-            })
-        }));
-        scheduler.register::<Trigger>(Arc::new(|_event, _ctx, _bus| {
-            Box::pin(async move {
-                sleep(Duration::from_millis(200)).await;
-                Ok(())
-            })
-        }));
+        scheduler.register::<Trigger>(
+            "scheduler_test_step_3",
+            Arc::new(|_event, _ctx, _bus| {
+                Box::pin(async move {
+                    sleep(Duration::from_millis(200)).await;
+                    Ok(())
+                })
+            }),
+        );
+        scheduler.register::<Trigger>(
+            "scheduler_test_step_4",
+            Arc::new(|_event, _ctx, _bus| {
+                Box::pin(async move {
+                    sleep(Duration::from_millis(200)).await;
+                    Ok(())
+                })
+            }),
+        );
 
         let started = Instant::now();
         scheduler
@@ -566,25 +893,28 @@ mod tests {
         // `WorkflowStepFailed` event (published by the
         // step itself, per the design — the Scheduler
         // does not double-publish on `Err`).
-        let (scheduler, bus, handle) = fresh();
+        let (scheduler, bus, handle) = fresh().await;
         let mut failed = bus.subscribe::<WorkflowStepFailed>(16);
 
-        scheduler.register::<Trigger>(Arc::new(|_event, ctx, bus_handle| {
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                bus_handle
-                    .publish(
-                        WorkflowStepFailed {
-                            event_type: "Trigger".into(),
-                            kind: AfaErrorKind::Unavailable,
-                            message: "service down".into(),
-                        },
-                        ctx,
-                    )
-                    .await;
-                Err(Box::new(StepError("service down".into())) as Box<dyn AfaError>)
-            })
-        }));
+        scheduler.register::<Trigger>(
+            "scheduler_test_step_5",
+            Arc::new(|_event, ctx, bus_handle| {
+                let ctx = ctx.clone();
+                Box::pin(async move {
+                    bus_handle
+                        .publish(
+                            WorkflowStepFailed {
+                                event_type: "Trigger".into(),
+                                kind: AfaErrorKind::Unavailable,
+                                message: "service down".into(),
+                            },
+                            ctx,
+                        )
+                        .await;
+                    Err(Box::new(StepError("service down".into())) as Box<dyn AfaError>)
+                })
+            }),
+        );
 
         scheduler
             .dispatch(
@@ -610,26 +940,32 @@ mod tests {
         // `AfaErrorKind::Internal` (published by the
         // Scheduler, on the step's behalf), and any
         // sibling step still completes.
-        let (scheduler, bus, handle) = fresh();
+        let (scheduler, bus, handle) = fresh().await;
         let mut failed = bus.subscribe::<WorkflowStepFailed>(16);
 
         // Counter proves the sibling step completed.
         let sibling_counter = Arc::new(AtomicUsize::new(0));
 
-        scheduler.register::<Trigger>(Arc::new(|_event, _ctx, _bus| {
-            Box::pin(async move {
-                panic!("deliberate panic to test isolation");
-            })
-        }));
+        scheduler.register::<Trigger>(
+            "scheduler_test_step_6",
+            Arc::new(|_event, _ctx, _bus| {
+                Box::pin(async move {
+                    panic!("deliberate panic to test isolation");
+                })
+            }),
+        );
 
         let counter_for_sibling = Arc::clone(&sibling_counter);
-        scheduler.register::<Trigger>(Arc::new(move |_event, _ctx, _bus| {
-            let counter = Arc::clone(&counter_for_sibling);
-            Box::pin(async move {
-                counter.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
-        }));
+        scheduler.register::<Trigger>(
+            "scheduler_test_step_7",
+            Arc::new(move |_event, _ctx, _bus| {
+                let counter = Arc::clone(&counter_for_sibling);
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }),
+        );
 
         // If panic isolation were broken, this would
         // take down the test process. Reaching the next
@@ -661,7 +997,7 @@ mod tests {
     async fn dispatch_with_zero_registered_steps_does_not_error_or_panic() {
         // Flow 6 Edge case C: dispatching an event with
         // no registered steps is a no-op, not an error.
-        let (scheduler, bus, handle) = fresh();
+        let (scheduler, bus, handle) = fresh().await;
         // Subscribe to confirm no spurious events are
         // published by the Scheduler itself.
         let mut failed = bus.subscribe::<WorkflowStepFailed>(16);

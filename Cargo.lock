@@ -90,10 +90,12 @@ version = "0.1.0"
 dependencies = [
  "afa-bus",
  "afa-contracts",
+ "afa-observability",
  "afa-plugin-knowledge-json",
  "afa-plugin-llm-http",
  "afa-security",
  "async-trait",
+ "chrono",
  "futures-util",
  "hex",
  "rusqlite",

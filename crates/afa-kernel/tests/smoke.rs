@@ -113,7 +113,9 @@ async fn the_full_pipeline_works_from_a_downstream_consumer_view() {
             Ok(())
         })
     });
-    kernel.scheduler().register::<Trigger>(step);
+    kernel
+        .scheduler()
+        .register::<Trigger>("consumer-step", step);
 
     // 4. The consumer ingests the trigger event
     //    via the single ingress point
@@ -179,13 +181,14 @@ async fn a_panicking_step_does_not_break_the_smoke_test_pipeline() {
     let mut failed = bus.subscribe::<WorkflowStepFailed>(16);
     let mut audit = bus.subscribe::<EventReceived>(16);
 
-    kernel
-        .scheduler()
-        .register::<Trigger>(Arc::new(|_event, _ctx, _bus| {
+    kernel.scheduler().register::<Trigger>(
+        "kernel_test_step_1",
+        Arc::new(|_event, _ctx, _bus| {
             Box::pin(async move {
                 panic!("deliberate panic in smoke test");
             })
-        }));
+        }),
+    );
 
     // Reaching the next line is the first
     // assertion (a propagating panic would have

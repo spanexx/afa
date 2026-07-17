@@ -60,7 +60,7 @@
 //! listed as "future pack" tests).
 
 use afa_bus::EventBus;
-use afa_contracts::Actor;
+use afa_contracts::{Actor, ExecutionContext, TenantId};
 use afa_observability::{ObservabilityConfig, ObservabilityEngine};
 use chrono::Utc;
 use rusqlite::Connection;
@@ -140,6 +140,7 @@ async fn span_record_shape() {
             engine_name,
             operation,
             BTreeMap::new(),
+            None, // parent_span_id (engine.record_span called directly)
             duration_ms,
             afa_contracts::SpanOutcome::Ok,
             started_at,
@@ -300,174 +301,81 @@ async fn span_record_shape() {
 
 // CID:afa-observability-tracing-002 - span_with_parent
 // Purpose: Verify the parent-span linkage. The
-// recording nurse's thread-local holds the
-// most-recent outer call's span_id; an inner
-// call's row must carry that span_id in the
-// parent_span_id column so the dashboard can
-// draw the nested view.
+// wrapper helper takes `parent_span_id:
+// Option<Uuid>` explicitly; the resulting
+// SpanRecord's `parent_span_id` column must
+// equal that UUID.
 //
 // **Why this is a real test**: the parent-span
 // field is the only way the dashboard can group
 // sub-spans under their caller (a "store" span
 // with two "seal" sub-spans needs the
 // dashboard to show the parent-child tree).
-// A test failure means the wrapper helper's
-// thread-local isn't being read by the
-// engine's method form (or the column wiring is
-// wrong).
+// A test failure means the wrapper helper is
+// not forwarding its `parent_span_id` arg to
+// the engine's `record_span` method.
 //
-// **Test shape**: two record_span calls in
-// the same thread, second with no artificial
-// nesting setup -- the second one will see
-// the first as parent ONLY IF the wrapper
-// helper's thread-local is wired correctly.
-// To drive the thread-local, we use the
-// free-fn wrapper helper with a no-op async
-// closure; the wrapper's set_parent_span_id
-// on entry + clear on exit establishes the
-// link for any inner record_span called
-// synchronously while the wrapper is on the
-// stack.
+// **Doc-drift correction #14 vs. the IMPL
+// draft**: the IMPL's `span_with_parent`
+// asserted that the wrapper helper's
+// `thread_local!` parent propagated to inner
+// `engine.record_span` calls. That assumption
+// was wrong — `tokio::task::JoinSet::spawn`
+// puts spawned tasks on a different worker
+// thread, where the thread_local is empty.
+// The wrapper was rewritten to take
+// `parent_span_id` as an explicit parameter
+// (see `record.rs` header doc-drift #14);
+// the wrapper does NOT auto-mint a parent.
+// Callers (kernel/scheduler) mint the parent
+// UUID once and pass it explicitly to each
+// nested wrap.
 //
-// **Why no #[tokio::main]**: we use
-// tokio::test so the local Set doesn't escape
-// the test thread.
+// **Test shape**: pass a known UUID as the
+// wrapper's parent_span_id arg. After the
+// wrap, the spans DB must have exactly one row
+// whose `parent_span_id` column is that UUID.
+// We use a unique known UUID so the assertion
+// is unambiguous (we don't have to
+// cross-reference other rows).
 #[tokio::test]
 async fn span_with_parent() {
     let dir = TempDir::new().expect("tempdir");
-    let (engine, conn) = boot_engine(&dir).await;
-    let ctx = fresh_ctx();
-
-    // Drive the wrapper helper with a no-op
-    // closure so the thread-local is set. The
-    // wrapper's entry pushes a fresh span_id;
-    // its exit clears it.
-    //
-    // The "outer" wrap establishes the
-    // thread-local parent. The "inner"
-    // record_span (called inside the wrap) is
-    // what we want to see populated as the
-    // child.
-    let outer_result: Result<(), afa_observability::ObservabilityError> =
-        afa_observability::record_span(
-            &ctx,
-            "afa-test-wrapper",
-            "outer.op",
-            BTreeMap::new(),
-            &engine,
-            async {
-                let started_at = Utc::now();
-                // This call happens INSIDE the
-                // wrapper's scope. Its engine
-                // method should see the
-                // outer span_id as parent.
-                engine
-                    .record_span(
-                        &ctx,
-                        "afa-test",
-                        "inner.op",
-                        BTreeMap::new(),
-                        7,
-                        afa_contracts::SpanOutcome::Ok,
-                        started_at,
-                    )
-                    .await?;
-                Ok(())
-            },
-        )
-        .await;
-    outer_result.expect("the wrapper call should succeed");
-
-    // Both the outer and the inner span should
-    // be present. Order rows by span_id (not
-    // started_at -- the wire stores ms precision
-    // and the two are emitted within the same
-    // millisecond).
-    let rows: Vec<(String, Option<String>, String, String)> = {
-        let mut stmt = conn
-            .prepare(
-                "SELECT span_id, parent_span_id, engine, operation
-                 FROM spans
-                 ORDER BY engine",
-            )
-            .expect("prepare");
-        let collected: Vec<_> = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
-            .expect("query")
-            .filter_map(|r| r.ok())
-            .collect();
-        collected
-    };
-    assert_eq!(rows.len(), 2, "exactly two rows expected (outer + inner)");
-
-    eprintln!("DB rows: {:#?}", rows);
-
-    // The inner row's parent_span_id must be Some.
-    // **Doc-drift correction #14 vs. the IMPL draft**
-    // (folded into this test, not the IMPL):
-    // the IMPL's `span_with_parent` test asserts
-    // "the child row's parent_span_id is the
-    // parent's span_id". The wrapper helper mints
-    // ONE UUID for the thread-local (the
-    // `outer_span_id` in record.rs) and the
-    // engine.record_span call INSIDE the wrapper
-    // emits the OUTER row with a DIFFERENT UUID
-    // (the engine generates a fresh span_id on
-    // every record_span call -- the wrapper's
-    // mint is consumed as the parent's
-    // thread-local value, not as the record's
-    // own span_id).
-    //
-    // The actually-implemented contract:
-    // - Inner row's parent_span_id is Some(some
-    //   UUID) -- it was set during the await
-    //   because the wrapper's PARENT thread-local
-    //   was populated for the duration of the
-    //   inner call.
-    // - Outer row's parent_span_id is None --
-    //   the wrapper's own engine.record_span call
-    //   happens AFTER the thread-local is
-    //   cleared, so it sees None.
-    //
-    // Earlier (pre-#14) draft asserted
-    // "inner.parent == Some(outer.span_id)";
-    // this fails because the engine generates a
-    // fresh span_id on every record_span call
-    // (the wrapper's mint is the PARENT, not the
-    // outer's own span_id). Fix: assert the
-    // structural truth (parent linkage present,
-    // outer row's parent is None) without
-    // asserting the two unrelated UUIDs are equal.
+    let (engine, _conn) = boot_engine(&dir).await;
+    let ctx = ExecutionContext::new(TenantId::new("tenant-parent-test"), Actor::Timer);
+    let parent_uuid = Uuid::new_v4();
+    let r: Result<(), afa_observability::ObservabilityError> = afa_observability::record_span(
+        &ctx,
+        "afa-test-wrapper",
+        "wrap.op",
+        BTreeMap::new(),
+        Some(parent_uuid),
+        &engine,
+        async { Ok(()) },
+    )
+    .await;
     assert!(
-        rows[0].1.is_some() || rows[1].1.is_some(),
-        "at least one row must have a parent_span_id (the wrapper's thread-local)"
+        r.is_ok(),
+        "wrapper helper with explicit parent_uuid must succeed: {:?}",
+        r
     );
-    // The outer span (wrapper-engine row) is
-    // asserted-by-exclusion in the rows.len()==2
-    // assertion below; it has parent_span_id =
-    // None (the wrapper's own engine.record_span
-    // call happens AFTER the thread-local is
-    // cleared). See the doc-drift #14 comment
-    // above for the full rationale.
-    // Sanity: the wrapper helper is called by
-    // the engine, but the wrapper itself does
-    // NOT emit a SpanRecord (Phase 1's wrapper
-    // helper routes through engine.record_span;
-    // Phase 2 will add the helper's own span
-    // record).
-    //
-    // The current helper calls engine.record_span
-    // with duration_ms = 0 -- so the outer span
-    // in the table is the one the helper emitted,
-    // NOT a span the helper opened. Two rows, not
-    // three.
+
+    // Exactly one row, with parent = our UUID.
+    let conn = Connection::open(engine.storage().path.clone()).expect("reopen spans DB");
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM spans", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(count, 1, "exactly one row expected");
+    let recorded_parent: String = conn
+        .query_row("SELECT COALESCE(parent_span_id, '') FROM spans", [], |r| {
+            r.get(0)
+        })
+        .expect("read parent");
+    assert_eq!(
+        recorded_parent,
+        parent_uuid.to_string(),
+        "the wrapper must record the parent_uuid we passed"
+    );
 }
 
 // CID:afa-observability-tracing-003 - span_outcome_ok_and_err
@@ -513,6 +421,7 @@ async fn span_outcome_ok_and_err() {
             "afa-test",
             "ok.op",
             BTreeMap::new(),
+            None, // parent_span_id (engine.record_span called directly)
             10,
             afa_contracts::SpanOutcome::Ok,
             started_at,
@@ -531,6 +440,7 @@ async fn span_outcome_ok_and_err() {
             "afa-test",
             "err.op",
             BTreeMap::new(),
+            None, // parent_span_id (engine.record_span called directly)
             20,
             afa_contracts::SpanOutcome::Err {
                 kind: err_kind,
@@ -623,9 +533,15 @@ async fn attributes_cap_64_entries() {
     }
     assert_eq!(attrs.len(), 65, "test setup: must have 65 attrs");
 
-    afa_observability::record_span(&ctx, "afa-test", "attrs.op", attrs, &engine, async {
-        Ok::<(), afa_observability::ObservabilityError>(())
-    })
+    afa_observability::record_span(
+        &ctx,
+        "afa-test",
+        "attrs.op",
+        attrs,
+        None, // root span in this test
+        &engine,
+        async { Ok::<(), afa_observability::ObservabilityError>(()) },
+    )
     .await
     .expect("the wrapper call should succeed even when attrs are over-cap");
 
@@ -674,9 +590,15 @@ async fn attributes_cap_4kb_per_value() {
     attrs.insert("big".to_string(), "x".repeat(5000)); // > 4 KiB
     assert!(attrs.get("big").unwrap().len() > 4096);
 
-    afa_observability::record_span(&ctx, "afa-test", "attrs_big.op", attrs, &engine, async {
-        Ok::<(), afa_observability::ObservabilityError>(())
-    })
+    afa_observability::record_span(
+        &ctx,
+        "afa-test",
+        "attrs_big.op",
+        attrs,
+        None, // root span in this test
+        &engine,
+        async { Ok::<(), afa_observability::ObservabilityError>(()) },
+    )
     .await
     .expect("wrapper should not error on cap-violation");
 
@@ -755,6 +677,7 @@ async fn purge_run_emits_event() {
                 "afa-test",
                 "old.op",
                 BTreeMap::new(),
+                None, // parent_span_id (engine.record_span called directly)
                 1,
                 afa_contracts::SpanOutcome::Ok,
                 eight_days_ago,
@@ -855,6 +778,7 @@ async fn retention_null_no_op() {
                 "afa-test",
                 "recent.op",
                 BTreeMap::new(),
+                None, // parent_span_id (engine.record_span called directly)
                 1,
                 afa_contracts::SpanOutcome::Ok,
                 one_hour_ago,
@@ -950,6 +874,7 @@ async fn purge_chunks_at_purge_chunk_size() {
                 "afa-test",
                 "bulk.op",
                 BTreeMap::new(),
+                None, // parent_span_id (engine.record_span called directly)
                 1,
                 afa_contracts::SpanOutcome::Ok,
                 eight_days_ago,
@@ -1196,6 +1121,7 @@ async fn span_write_failed_does_not_affect_caller() {
             "afa-test",
             "ok.op",
             BTreeMap::new(),
+            None, // parent_span_id (engine.record_span called directly)
             1,
             afa_contracts::SpanOutcome::Ok,
             Utc::now(),

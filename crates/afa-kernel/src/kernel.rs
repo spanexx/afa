@@ -35,6 +35,7 @@ use crate::event_bus::{EventBus, EventBusHandle};
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
 use afa_contracts::{EmbeddingV1, KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1, StorageError};
+use afa_observability::{ObservabilityConfig, ObservabilityEngine};
 use afa_security::{open_storage, MasterKey, SecurityEngine};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,6 +63,13 @@ pub struct Kernel {
     scheduler: Arc<Scheduler>,
     event_bus: Arc<EventBus>,
     security: Arc<dyn SecurityV1>,
+    /// The observability engine. Held in the
+    /// kernel (not just the Runtime / Scheduler)
+    /// so the `Clone` impl can re-build a `Runtime`
+    /// over the same engine (the engine is
+    /// `Arc`-shared, so the new Runtime points at
+    /// the same spans DB connection).
+    observability: Arc<ObservabilityEngine>,
     /// The capability registry. The slot
     /// type is `CapabilityRegistry` (not
     /// `Arc<CapabilityRegistry>`) because the
@@ -158,8 +166,49 @@ impl Kernel {
         // Step 2: build the shared bus (every adapter
         // sees the same one), and the `Runtime` /
         // `Scheduler` over it.
-        let scheduler = Arc::new(Scheduler::new());
         let event_bus = Arc::new(EventBus::new());
+
+        // Step 2.5: build the observability
+        // engine. The spans DB is co-located
+        // with the secrets DB (sibling file
+        // `<secrets_db_path_parent>/spans.db`)
+        // so a single kernel install has a
+        // single directory of state. The
+        // engine's bus handle is a clone of the
+        // shared bus so the kernel's
+        // SpansWriteFailed / SpansPurged
+        // events ride the same bus the
+        // security engine's audit events
+        // ride.
+        let spans_db_path = secrets_db_path
+            .parent()
+            .map(|p| p.join("spans.db"))
+            .unwrap_or_else(|| PathBuf::from("spans.db"));
+        let observability = ObservabilityEngine::new(
+            ObservabilityConfig::with_default_retention(spans_db_path),
+            event_bus.handle(),
+        )
+        .await
+        .map_err(|e| {
+            // The engine's `with_default_retention`
+            // config has `purge_interval_hours = 1`
+            // and `retention_days = Some(7)` — a
+            // build that fails is one of:
+            // (1) the spans DB path is unwritable,
+            // (2) the migration row already exists
+            // with a mismatched version. The
+            // kernel surfaces both as
+            // `StorageUnreachable` (a sibling of
+            // the security engine's own
+            // storage-error contract — the
+            // operator sees the same bucket
+            // for both engines).
+            SecurityErrorV1::StorageUnreachable {
+                reason: format!("observability engine boot: {e}"),
+            }
+        })?;
+
+        let scheduler = Arc::new(Scheduler::new(Arc::clone(&observability)));
 
         // Step 3: build the `SecurityEngine`. The
         // engine gets a fresh `Arc` clone of the bus
@@ -175,14 +224,20 @@ impl Kernel {
         let security: Arc<dyn SecurityV1> = Arc::new(engine);
 
         // Step 4: build the `Runtime` over the
-        // scheduler and the bus handle.
-        let runtime = Runtime::new(Arc::clone(&scheduler), event_bus.handle());
+        // scheduler, the bus handle, and the
+        // observability engine.
+        let runtime = Runtime::new(
+            Arc::clone(&scheduler),
+            event_bus.handle(),
+            Arc::clone(&observability),
+        );
 
         Ok(Self {
             runtime,
             scheduler,
             event_bus,
             security,
+            observability,
             capabilities: std::sync::Mutex::new(CapabilityRegistry::new()),
         })
     }
@@ -192,6 +247,29 @@ impl Kernel {
     /// the kernel; there is no other path.
     pub fn runtime(&self) -> &Runtime {
         &self.runtime
+    }
+
+    /// Hand out the spans DB path. The path is the
+    /// sibling of the secrets DB path, with the
+    /// `spans.db` filename (the v1 layout). Tests
+    /// and dashboards open this path directly with
+    /// `rusqlite` to inspect / read the spans
+    /// table.
+    pub fn spans_db_path(&self) -> PathBuf {
+        self.observability.config().spans_db_path.clone()
+    }
+
+    /// Hand out the `Arc<ObservabilityEngine>`. The
+    /// engine is the canonical writer of the spans
+    /// DB; a workflow that wants to record a custom
+    /// span (e.g. a long-running `complete` call on
+    /// a future LLM adapter) calls
+    /// `engine.record_span(...)` directly, then
+    /// routes its own sub-work through the
+    /// `record_span` / `record_span_value`
+    /// helpers.
+    pub fn observability(&self) -> Arc<ObservabilityEngine> {
+        Arc::clone(&self.observability)
     }
 
     /// Hand out a fresh `Arc<Scheduler>` (the
@@ -419,10 +497,15 @@ impl Clone for Kernel {
             .expect("capabilities mutex")
             .clone();
         Self {
-            runtime: Runtime::new(Arc::clone(&self.scheduler), self.event_bus.handle()),
+            runtime: Runtime::new(
+                Arc::clone(&self.scheduler),
+                self.event_bus.handle(),
+                Arc::clone(&self.observability),
+            ),
             scheduler: Arc::clone(&self.scheduler),
             event_bus: Arc::clone(&self.event_bus),
             security: Arc::clone(&self.security),
+            observability: Arc::clone(&self.observability),
             capabilities: std::sync::Mutex::new(capabilities),
         }
     }
@@ -532,9 +615,9 @@ mod tests {
 
         // Register a step on the original's
         // scheduler (the shared one).
-        original
-            .scheduler()
-            .register::<Probe>(Arc::new(|_event, ctx, bus_handle| {
+        original.scheduler().register::<Probe>(
+            "kernel_test_step_1",
+            Arc::new(|_event, ctx, bus_handle| {
                 let ctx = ctx.clone();
                 Box::pin(async move {
                     // Publish a follow-up event with
@@ -550,7 +633,8 @@ mod tests {
                         .await;
                     Ok(())
                 })
-            }));
+            }),
+        );
 
         // Subscribe to the ProbeAck on the clone's
         // bus (the shared one).

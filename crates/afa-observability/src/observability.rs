@@ -348,11 +348,11 @@ impl ObservabilityEngine {
         engine_str: &str,
         operation: &str,
         attributes: BTreeMap<String, String>,
+        parent_span_id: Option<Uuid>,
         duration_ms: u32,
         outcome: SpanOutcome,
         started_at: DateTime<Utc>,
     ) -> Result<(), ObservabilityError> {
-        let parent_span_id = current_span_id();
         let correlation_id = ctx.correlation_id;
         let record = SpanRecord {
             span_id: Uuid::new_v4(),
@@ -369,13 +369,7 @@ impl ObservabilityEngine {
         };
 
         match persistence::write_span(&self.storage, &record).await {
-            Ok(()) => {
-                eprintln!(
-                    "[engine method] wrote span_id={} with parent_span_id={:?}",
-                    record.span_id, record.parent_span_id
-                );
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(e) => {
                 self.drops_in_last_hour.fetch_add(1, Ordering::Relaxed);
                 let event = afa_contracts::SpansWriteFailed {
@@ -458,33 +452,12 @@ impl ObservabilityEngine {
 // Uuid is a 128-bit value); translating one to the
 // other deterministically would require a separate
 // registry. The thread_local above is simpler and
-// correct for single-threaded execution.
-thread_local! {
-    static PARENT_SPAN_ID: std::cell::RefCell<Option<Uuid>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-// CID:afa-observability-observability-011 - current_span_id
-// Purpose: Read the thread-local parent span_id.
-// Returns None when called outside a wrapper scope
-// (the root span of a request is the common case).
-fn current_span_id() -> Option<Uuid> {
-    PARENT_SPAN_ID.with(|c| *c.borrow())
-}
-
-// CID:afa-observability-observability-012 - set_parent_span_id
-// Purpose: The thread-local setter. Called by the
-// free-fn record_span wrapper helper on entry (to
-// push the new span_id) and on exit (to clear to
-// None so a nested call without an enclosing
-// wrapper correctly sees None). Phase 2 wires
-// the call site; Phase 1 ships the helper so the
-// crate compiles and the lib tests can confirm
-// the thread-local round-trip.
-#[allow(dead_code)]
-pub(crate) fn set_parent_span_id(id: Option<Uuid>) {
-    PARENT_SPAN_ID.with(|c| *c.borrow_mut() = id);
-}
+// (no thread_local — the engine's `record_span`
+// takes `parent_span_id: Option<Uuid>` directly
+// from the caller. The wrapper helper passes
+// the UUID it minted on the same task, which
+// preserves nested-span linkage across tokio
+// task boundaries. See `record.rs`.)
 
 // CID:afa-observability-observability-013 - truncate_reason
 // Purpose: Cap a SpansWriteFailed event's reason
@@ -586,11 +559,6 @@ async fn run_one_purge_for_loop(
     };
     let _ = crate::purge::execute_one_purge(storage, event_bus, cutoff, chunk_size, drops).await;
     Ok(())
-}
-
-#[allow(dead_code)]
-pub(crate) fn _re_export_current_span_id() -> Option<Uuid> {
-    current_span_id()
 }
 
 // CID:afa-observability-observability-015 - timer_ctx

@@ -36,7 +36,9 @@
 use crate::event_bus::EventBusHandle;
 use crate::scheduler::Scheduler;
 use afa_contracts::{Actor, AfaEvent, CorrelationId, ExecutionContext, TenantId};
+use afa_observability::{record_span_value, ObservabilityEngine};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{debug, instrument};
 
@@ -98,15 +100,34 @@ impl AfaEvent for EventReceived {}
 pub struct Runtime {
     scheduler: Arc<Scheduler>,
     bus: EventBusHandle,
+    /// The observability engine. `Phase 2` of the
+    /// observability-baseline pack wires every
+    /// `ingest` call through the `record_span_value`
+    /// helper so the spans DB records one row per
+    /// top-level ingest (with the fan-out +
+    /// individual step spans as nested children).
+    /// The engine is `Arc`-shared with the
+    /// `Scheduler` (constructed once in
+    /// `Kernel::new` and handed to both), so the
+    /// two always see the same spans DB connection.
+    observability: Arc<ObservabilityEngine>,
 }
 
 impl Runtime {
-    /// Build a new `Runtime` over the given scheduler and
-    /// bus handle. Used by `Kernel::new`; not intended to
-    /// be called by end users (construct a `Kernel`
-    /// instead).
-    pub(crate) fn new(scheduler: Arc<Scheduler>, bus: EventBusHandle) -> Self {
-        Self { scheduler, bus }
+    /// Build a new `Runtime` over the given scheduler,
+    /// bus handle, and observability engine. Used by
+    /// `Kernel::new`; not intended to be called by end
+    /// users (construct a `Kernel` instead).
+    pub(crate) fn new(
+        scheduler: Arc<Scheduler>,
+        bus: EventBusHandle,
+        observability: Arc<ObservabilityEngine>,
+    ) -> Self {
+        Self {
+            scheduler,
+            bus,
+            observability,
+        }
     }
 
     /// Deliver an event of type `T` to the kernel.
@@ -134,6 +155,14 @@ impl Runtime {
     /// process. Callers who need to thread an external
     /// tracking number should put it in the event
     /// payload itself.
+    ///
+    /// **Phase 2 observability wiring**: the entire
+    /// body is wrapped in `record_span_value` so the
+    /// spans DB records one top-level "runtime.ingest"
+    /// row per call (with the `scheduler.dispatch` +
+    /// `scheduler.step` rows as nested children). The
+    /// existing `tracing::span!` and `debug!` calls are
+    /// preserved (the wrapper helper is additive).
     #[instrument(
         name = "runtime.ingest",
         skip_all,
@@ -149,35 +178,67 @@ impl Runtime {
         tenant: TenantId,
         actor: Actor,
     ) -> CorrelationId {
+        let event_type = std::any::type_name::<T>();
+        let mut attributes = BTreeMap::new();
+        attributes.insert("event_type".to_string(), event_type.to_string());
+        let observability = Arc::clone(&self.observability);
+        let scheduler = Arc::clone(&self.scheduler);
+        let bus = self.bus.clone();
+
+        // The `ExecutionContext` is built ONCE;
+        // the same `correlation_id` is used for
+        // the wrapper's spans DB row AND the
+        // inner `EventReceived` publish. This
+        // is what makes the `correlation_id`
+        // column of the spans DB
+        // self-consistent: one ingest
+        // = one correlation_id = three
+        // rows (ingest + dispatch + step),
+        // all sharing the same
+        // `correlation_id`. The IMPL
+        // §"runtime.ingest span" planning
+        // principle mandates this.
         let ctx = ExecutionContext::new(tenant, actor);
-        let correlation_id = ctx.correlation_id;
+        let ctx_for_wrap = ctx.clone();
+        record_span_value(
+            &ctx_for_wrap,
+            "afa-kernel",
+            "runtime.ingest",
+            attributes,
+            None, // root span of the ingest (the runtime is the entry point)
+            &observability,
+            async move {
+                let correlation_id = ctx.correlation_id;
 
-        // 1. Audit-trail: announce that an event has
-        //    been received.
-        self.bus
-            .publish(
-                EventReceived {
-                    correlation_id,
-                    event_type: std::any::type_name::<T>().to_string(),
-                },
-                ctx.clone(),
-            )
-            .await;
+                // 1. Audit-trail: announce that an
+                //    event has been received.
+                bus.publish(
+                    EventReceived {
+                        correlation_id,
+                        event_type: event_type.to_string(),
+                    },
+                    ctx.clone(),
+                )
+                .await;
 
-        debug!(
-            correlation_id = %correlation_id,
-            event_type = std::any::type_name::<T>(),
-            "event ingested; dispatching to registered steps"
-        );
+                debug!(
+                    correlation_id = %correlation_id,
+                    event_type = event_type,
+                    "event ingested; dispatching to registered steps"
+                );
 
-        // 2. Dispatch: fan the event out to all
-        //    registered steps. The dispatcher awaits
-        //    the full completion of every concurrent
-        //    step (success, err, or panic) before
-        //    returning.
-        self.scheduler.dispatch(event, ctx, self.bus.clone()).await;
+                // 2. Dispatch: fan the event out to
+                //    all registered steps. The
+                //    dispatcher awaits the full
+                //    completion of every concurrent
+                //    step (success, err, or panic)
+                //    before returning.
+                scheduler.dispatch(event, ctx, bus).await;
 
-        correlation_id
+                correlation_id
+            },
+        )
+        .await
     }
 }
 
@@ -381,20 +442,23 @@ mod tests {
         let bus = kernel.event_bus();
         let mut acks = bus.subscribe::<Ack>(16);
 
-        scheduler.register::<Trigger>(Arc::new(|_event, ctx, bus_handle| {
-            let ctx = ctx.clone();
-            Box::pin(async move {
-                bus_handle
-                    .publish(
-                        Ack {
-                            from: "step-1".into(),
-                        },
-                        ctx,
-                    )
-                    .await;
-                Ok(())
-            })
-        }));
+        scheduler.register::<Trigger>(
+            "kernel_test_step_1",
+            Arc::new(|_event, ctx, bus_handle| {
+                let ctx = ctx.clone();
+                Box::pin(async move {
+                    bus_handle
+                        .publish(
+                            Ack {
+                                from: "step-1".into(),
+                            },
+                            ctx,
+                        )
+                        .await;
+                    Ok(())
+                })
+            }),
+        );
 
         kernel
             .runtime()
@@ -425,11 +489,14 @@ mod tests {
         let mut failed = bus.subscribe::<WorkflowStepFailed>(16);
         let mut received = bus.subscribe::<EventReceived>(16);
 
-        scheduler.register::<Trigger>(Arc::new(|_event, _ctx, _bus| {
-            Box::pin(async move {
-                panic!("deliberate panic to test Runtime-level isolation");
-            })
-        }));
+        scheduler.register::<Trigger>(
+            "kernel_test_step_2",
+            Arc::new(|_event, _ctx, _bus| {
+                Box::pin(async move {
+                    panic!("deliberate panic to test Runtime-level isolation");
+                })
+            }),
+        );
 
         // Reaching the next line is the first
         // assertion (a propagating panic would have

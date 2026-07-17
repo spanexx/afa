@@ -15,6 +15,22 @@ afa-contracts = { path = "../afa-contracts" }
 # `afa_kernel::event_bus::*` for backwards compatibility.
 afa-bus = { path = "../afa-bus" }
 afa-security = { path = "../afa-security" }
+# Phase 2 wires the observability engine into the
+# kernel's dispatch path. The engine itself lives
+# in `afa-observability` (the spans-DB owner); the
+# kernel only needs the `ObservabilityEngine` +
+# `record_span` / `record_span_value` helpers, all
+# of which the engine re-exports from its crate
+# root.
+afa-observability = { path = "../afa-observability" }
+# Phase 2 records a `started_at` timestamp for every
+# step body via the engine's method-form
+# `record_span`. The type is `chrono::DateTime<Utc>`
+# (re-exported via the engine's signature), so the
+# kernel needs a direct `chrono` dep to mint the
+# `Utc::now()` value at step-spawn time.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["rt", "sync", "macros"] }
 tracing = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
@@ -84,13 +100,6 @@ afa-plugin-llm-http = { path = "../afa-plugin-llm-http" }
 # the kernel crate that materialises a concrete
 # Knowledge adapter.
 afa-plugin-knowledge-json = { path = "../afa-plugin-knowledge-json" }
-# Re-exported from `afa-contracts` (where it is a direct
-# dep). Used by `src/runtime.rs` to round-trip the
-# `CorrelationId` through the `uuid::Uuid` parser in the
-# "ingest returns the correlation id" test (a strict
-# shape check that would catch a `Display` impl that
-# emitted a placeholder string instead of a real UUID).
-uuid = "1"
 # Used by the in-crate `Kernel::new` boot-failure tests
 # in `src/kernel.rs` (the two CID:kernel-002 and
 # CID:kernel-003 tests added in Phase 0.5b). The tests
