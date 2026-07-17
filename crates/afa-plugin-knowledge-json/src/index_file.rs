@@ -351,7 +351,7 @@ fn collect_entries(index: &InMemoryIndex) -> Vec<IndexEntryV1> {
                     preview: m.preview.clone(),
                 })
                 .collect();
-            records.sort_by(|a, b| a.record_id.0.cmp(&b.record_id.0));
+            records.sort_by_key(|a| a.record_id.0);
             IndexEntryV1 { topic, records }
         })
         .collect()
