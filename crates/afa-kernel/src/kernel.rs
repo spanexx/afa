@@ -34,11 +34,15 @@ use crate::capability_registry::{CapabilityRegistry, RegisterError};
 use crate::event_bus::{EventBus, EventBusHandle};
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
-use afa_contracts::{EmbeddingV1, KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1, StorageError};
+use afa_contracts::{
+    EmbeddingV1, HealthCheck, HealthReport, HealthStatus, KnowledgeV1, LlmV1, SecurityErrorV1,
+    SecurityV1, StorageError,
+};
 use afa_observability::{ObservabilityConfig, ObservabilityEngine};
 use afa_security::{open_storage, MasterKey, SecurityEngine};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 // CID:kernel-001 - Kernel
 // Purpose: The top-level composition. Owns the
@@ -83,6 +87,7 @@ pub struct Kernel {
     /// and have the other clones see the
     /// registration immediately.
     capabilities: std::sync::Mutex<CapabilityRegistry>,
+    health_engines: RwLock<BTreeMap<String, Arc<dyn HealthCheck>>>,
 }
 
 impl Kernel {
@@ -237,12 +242,49 @@ impl Kernel {
             scheduler,
             event_bus,
             security,
-            observability,
+            observability: Arc::clone(&observability),
             capabilities: std::sync::Mutex::new(CapabilityRegistry::new()),
+            health_engines: RwLock::new(BTreeMap::from([(
+                "afa-observability".to_string(),
+                Arc::clone(&observability) as Arc<dyn HealthCheck>,
+            )])),
         })
     }
 
-    /// Borrow the `Runtime` (the single ingress point).
+    /// Build a health report from the kernel's
+    /// registered `HealthCheck` engines. The
+    /// observability engine is seeded at boot;
+    /// future engines register via the same
+    /// `RwLock<BTreeMap>` and become visible
+    /// on `/health` immediately. Overall status
+    /// is worst-wins: Unhealthy > Degraded > Healthy.
+    pub fn aggregate_health(&self) -> HealthReport {
+        let engines: BTreeMap<String, HealthStatus> = self
+            .health_engines
+            .read()
+            .expect("health engines lock")
+            .iter()
+            .map(|(name, engine)| (name.clone(), engine.health_check()))
+            .collect();
+        let overall = engines
+            .values()
+            .cloned()
+            .reduce(|acc, status| match (acc, status) {
+                (HealthStatus::Unhealthy { reason }, _)
+                | (_, HealthStatus::Unhealthy { reason }) => HealthStatus::Unhealthy { reason },
+                (HealthStatus::Degraded { reason }, _) | (_, HealthStatus::Degraded { reason }) => {
+                    HealthStatus::Degraded { reason }
+                }
+                (HealthStatus::Healthy, HealthStatus::Healthy) => HealthStatus::Healthy,
+            })
+            .unwrap_or(HealthStatus::Healthy);
+        HealthReport {
+            overall,
+            engines,
+            checked_at: chrono::Utc::now(),
+        }
+    }
+
     /// `Runtime` is the only way to send an event into
     /// the kernel; there is no other path.
     pub fn runtime(&self) -> &Runtime {
@@ -507,6 +549,12 @@ impl Clone for Kernel {
             security: Arc::clone(&self.security),
             observability: Arc::clone(&self.observability),
             capabilities: std::sync::Mutex::new(capabilities),
+            health_engines: RwLock::new(
+                self.health_engines
+                    .read()
+                    .expect("health engines lock")
+                    .clone(),
+            ),
         }
     }
 }

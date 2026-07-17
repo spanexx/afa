@@ -80,6 +80,7 @@ pub mod capability_registry;
 // `Runtime` (publishes `EventReceived`), `Scheduler`
 // (hands steps an `EventBusHandle`).
 pub use afa_bus as event_bus;
+pub mod dashboard;
 // CID:afa-kernel-lib-003 - kernel
 // Purpose: Re-export the top-level composition (Runtime +
 // Scheduler + Event Bus + Security Engine +

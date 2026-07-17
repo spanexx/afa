@@ -472,7 +472,37 @@ pub async fn read_recent(
     rows.into_iter().map(|r| r.into_record()).collect()
 }
 
-// CID:afa-observability-persistence-005 - delete_older_than
+pub async fn read_after_started_at(
+    storage: &Storage,
+    since: DateTime<Utc>,
+    limit: u32,
+) -> Result<Vec<SpanRecord>, ObservabilityError> {
+    let since_str = since.to_rfc3339();
+    let rows: Vec<DbRow> = with_conn(storage, move |conn| {
+        Box::pin(async move {
+            let mut stmt = conn.prepare(
+                "SELECT span_id, parent_span_id, correlation_id,
+                            tenant_id, actor_json, engine, operation,
+                            started_at, duration_ms, outcome_json,
+                            attributes_json
+                 FROM spans
+                 WHERE started_at < ?1
+                 ORDER BY started_at DESC
+                 LIMIT ?2",
+            )?;
+            let parsed: Vec<DbRow> = stmt
+                .query_map(rusqlite::params![since_str, limit as i64], DbRow::from_row)?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok::<Vec<DbRow>, rusqlite::Error>(parsed)
+        })
+    })
+    .await
+    .map_err(map_with_conn_err)?;
+
+    rows.into_iter().map(|r| r.into_record()).collect()
+}
+
 // Purpose: DELETE every span with started_at <
 // older_than. Used by the retention purge. Returns
 // the number of rows deleted (the
