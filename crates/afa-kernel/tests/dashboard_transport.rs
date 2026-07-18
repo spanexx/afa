@@ -19,6 +19,7 @@ use afa_security::MasterKey;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tower::ServiceExt;
@@ -39,7 +40,36 @@ async fn fresh_kernel() -> (TempDir, Kernel) {
 #[tokio::test]
 async fn health_open_no_bearer() {
     let (_dir, kernel) = fresh_kernel().await;
-    let response = router(Arc::new(kernel))
+    let kernel = Arc::new(kernel);
+
+    // First seal the dashboard-token so the kernel
+    // transitions from PreBootstrap to Full mode.
+    // (Drift #16 / GAP-007: a fresh kernel boots
+    // in PreBootstrap and returns 503 on /health.)
+    let seal_app = router(Arc::clone(&kernel));
+    let seal_resp = seal_app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/pre-bootstrap/seal")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "name": "dashboard-token",
+                        "value": "test-token",
+                    }))
+                    .expect("json"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(seal_resp.status(), StatusCode::OK);
+
+    // Now /health should return 200 with a HealthReport.
+    // Build a fresh router over the same (now sealed) kernel.
+    let health_app = router(kernel);
+    let response = health_app
         .oneshot(
             Request::builder()
                 .uri("/health")
@@ -58,6 +88,47 @@ async fn health_open_no_bearer() {
         report.overall,
         afa_contracts::HealthStatus::Healthy
     ));
+}
+
+#[tokio::test]
+async fn health_503_on_pre_bootstrap() {
+    let (_dir, kernel) = fresh_kernel().await;
+
+    // CID:dashboard-transport-002 - health_503_on_pre_bootstrap
+    // Purpose: A fresh kernel (no `dashboard-token`
+    // sealed) boots in `PreBootstrap` mode. The
+    // `/health` endpoint must return `503 SERVICE_UNAVAILABLE`
+    // with `"pre_bootstrap": true` in the JSON body,
+    // so load balancers can detect a non-sealed kernel.
+    assert!(
+        kernel.mode().is_pre_bootstrap(),
+        "fresh kernel must boot in PreBootstrap"
+    );
+
+    let response = router(Arc::new(kernel))
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body");
+    let json: Value = serde_json::from_slice(&body).expect("JSON body");
+    assert_eq!(
+        json.get("pre_bootstrap"),
+        Some(&Value::Bool(true)),
+        "response must have pre_bootstrap: true"
+    );
+    assert!(
+        json.get("overall").is_some(),
+        "response must have overall health status"
+    );
 }
 
 #[allow(dead_code)]

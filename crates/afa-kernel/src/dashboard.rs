@@ -48,6 +48,7 @@
 
 mod auth;
 mod health;
+mod pre_bootstrap;
 mod spans;
 
 use crate::Kernel;
@@ -82,6 +83,15 @@ pub fn router(kernel: Arc<Kernel>) -> Router {
 
     Router::new()
         .route("/health", get(health::handler))
+        // Day-0 endpoint: the operator (or SPA
+        // Setup Wizard) hits this to seal the
+        // first secret. Mounted OUTSIDE the
+        // bearer middleware — the handler
+        // itself enforces the mode check.
+        .route(
+            "/pre-bootstrap/seal",
+            axum::routing::post(pre_bootstrap::handler),
+        )
         .nest("/spans", protected)
         .with_state(state)
 }

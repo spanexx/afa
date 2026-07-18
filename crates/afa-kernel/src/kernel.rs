@@ -32,6 +32,7 @@
 
 use crate::capability_registry::{CapabilityRegistry, RegisterError};
 use crate::event_bus::{EventBus, EventBusHandle};
+use crate::mode::ModeController;
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
 use afa_contracts::{
@@ -88,6 +89,12 @@ pub struct Kernel {
     /// registration immediately.
     capabilities: std::sync::Mutex<CapabilityRegistry>,
     health_engines: RwLock<BTreeMap<String, Arc<dyn HealthCheck>>>,
+    /// The kernel's four-state lifecycle. Cloned
+    /// (the `ModeController` is internally
+    /// `Arc`-wrapped) so every kernel clone
+    /// observes the same transitions.
+    /// See `mode.rs` for the Code Map.
+    mode: Arc<crate::mode::ModeController>,
 }
 
 impl Kernel {
@@ -228,6 +235,40 @@ impl Kernel {
         // SQLite file.
         let security: Arc<dyn SecurityV1> = Arc::new(engine);
 
+        // CID:kernel-004 - day-0 mode detection
+        // Purpose: Determine the kernel's initial
+        // `Mode` from the security engine's
+        // `dashboard-token` state. The IMPL draft
+        // (per the Pack #6 §"Re-opens from Pack #7a")
+        // requires the kernel to inspect the vault
+        // at boot: if `dashboard-token` is sealed
+        // (any `lookup_hash` result, including
+        // `Ok(false)` for a wrong placeholder), the
+        // kernel starts in `Full`; if the engine
+        // returns `Err(SecretNotFound)`, the kernel
+        // starts in `PreBootstrap` and the operator
+        // must hit `POST /pre-bootstrap/seal` to
+        // continue. The old exit-78 path is gone —
+        // the kernel always boots; the `/health`
+        // handler surfaces the mode to load
+        // balancers via the `503 pre_bootstrap: true`
+        // response.
+        //
+        // The placeholder hash is a 64-zero-hex
+        // string (a valid SHA-256 hex shape; never
+        // matches a real stored hash, so the
+        // engine returns `Ok(false)` if the secret
+        // exists and `Err(SecretNotFound)` if it
+        // doesn't).
+        let placeholder_hash = "0".repeat(64);
+        let mode = match security
+            .lookup_hash("dashboard-token", &placeholder_hash)
+            .await
+        {
+            Ok(_) => ModeController::new_full(),
+            Err(_) => ModeController::new_pre_bootstrap(),
+        };
+
         // Step 4: build the `Runtime` over the
         // scheduler, the bus handle, and the
         // observability engine.
@@ -248,7 +289,30 @@ impl Kernel {
                 "afa-observability".to_string(),
                 Arc::clone(&observability) as Arc<dyn HealthCheck>,
             )])),
+            mode: Arc::new(mode),
         })
+    }
+
+    /// Return the kernel's current lifecycle
+    /// state. See `mode.rs` for the transition
+    /// logic; this is a read-only view.
+    /// Used by: the dashboard `/health` handler,
+    /// the bearer auth middleware (Phase 4b), and
+    /// the `POST /pre-bootstrap/seal` handler.
+    pub fn mode(&self) -> crate::mode::Mode {
+        self.mode.current()
+    }
+
+    /// Hand out a `&ModeController` so the
+    /// dashboard handlers (notably
+    /// `pre_bootstrap::handler`) can drive the
+    /// transition methods without going through
+    /// the read-only `mode()` accessor. The
+    /// controller is internally `Arc`-shared,
+    /// so cloning it is cheap.
+    /// Used by: `dashboard::pre_bootstrap::handler`.
+    pub fn mode_controller(&self) -> &crate::mode::ModeController {
+        &self.mode
     }
 
     /// Build a health report from the kernel's
@@ -555,6 +619,7 @@ impl Clone for Kernel {
                     .expect("health engines lock")
                     .clone(),
             ),
+            mode: Arc::clone(&self.mode),
         }
     }
 }

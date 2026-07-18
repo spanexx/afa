@@ -81,6 +81,7 @@ tempfile = "3"
 # test-only request-recording API and the native
 # tokio-friendly async server.
 wiremock = "0.6"
+http-body-util = "0.1"
 # Concrete LLM adapter for the Phase 4 end-to-end
 # integration test (`tests/llm_integration.rs`).
 # Used in the `dev-dependencies` section (not
@@ -118,3 +119,5 @@ afa-plugin-knowledge-json = { path = "../afa-plugin-knowledge-json" }
 # `dev-dependencies`-only to keep the production
 # binary free of the SQLite C bindings.
 rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"

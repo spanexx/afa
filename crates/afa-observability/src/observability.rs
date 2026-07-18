@@ -415,6 +415,18 @@ impl ObservabilityEngine {
         &self.storage
     }
 
+    /// Hand out a `&EventBusHandle` so callers
+    /// outside the crate (notably the kernel's
+    /// integration tests) can pass it to
+    /// `purge::run_one_purge` without going
+    /// through the private field. The handle
+    /// is a cheap-to-clone shared bus publisher
+    /// (one per engine; the bus itself is
+    /// `Arc`-backed).
+    pub fn event_bus(&self) -> &EventBusHandle {
+        &self.event_bus
+    }
+
     // CID:afa-observability-observability-009 - config
     // Purpose: Borrow the engine's config snapshot.
     // Used by tests + future engine paths that

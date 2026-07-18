@@ -99,6 +99,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hex",
+ "http-body-util",
  "rusqlite",
  "serde",
  "serde_json",

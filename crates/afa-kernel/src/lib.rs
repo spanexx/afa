@@ -89,6 +89,15 @@ pub mod dashboard;
 // Used by: every consumer of the kernel; this is the type most
 // callers will hold and pass around.
 pub mod kernel;
+// CID:afa-kernel-lib-013 - mode
+// Purpose: The kernel's four-state lifecycle
+// (`Booting` → `PreBootstrap` → `Sealing` → `Full`,
+// with a `Sealing` → `PreBootstrap` failure
+// rollback). See `mode.rs` for the Code Map.
+// Used by: `Kernel` (held as `Arc<ModeController>`),
+// the dashboard handlers, and the bearer auth
+// middleware (Phase 4b).
+pub mod mode;
 // CID:afa-kernel-lib-004 - runtime
 // Purpose: Re-export the single ingress point (`Runtime::ingest`)
 // that turns a raw event into a dispatched unit of work and

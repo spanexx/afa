@@ -29,18 +29,37 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use serde_json::json;
 
 // CID:dashboard-health-001 - handler
 // Purpose: Return `HealthReport` as JSON. Healthy and Degraded
 // reports use 200; Unhealthy reports use 503 so a load balancer
 // can react without parsing the body.
+// Drift #16 (GAP-007): when the kernel is in PreBootstrap mode,
+// the response is 503 with `"pre_bootstrap": true` in the body
+// so load balancers can detect a non-sealed kernel.
 // Used by: GET /health.
 pub(crate) async fn handler(State(state): State<DashboardState>) -> impl IntoResponse {
-    let report: HealthReport = state.kernel.aggregate_health();
+    let kernel = &state.kernel;
+
+    // Drift #16 (GAP-007): return 503 when the kernel is in
+    // PreBootstrap mode (dashboard-token has not been sealed yet).
+    if kernel.mode().is_pre_bootstrap() {
+        let report = kernel.aggregate_health();
+        let body = json!({
+            "pre_bootstrap": true,
+            "overall": report.overall,
+            "engines": report.engines,
+            "checked_at": report.checked_at,
+        });
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(body));
+    }
+
+    let report: HealthReport = kernel.aggregate_health();
     let status = if matches!(report.overall, HealthStatus::Unhealthy { .. }) {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::OK
     };
-    (status, Json(report))
+    (status, Json(json!(report)))
 }
