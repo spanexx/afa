@@ -6,6 +6,8 @@ description = "The AFA kernel: event ingress, scheduler, and in-process pub/sub 
 license = "Apache-2.0"
 
 [dependencies]
+# Axum provides the Phase 3 Dashboard Transport HTTP + WebSocket router.
+axum = { version = "0.8", features = ["ws", "json", "http1"] }
 afa-contracts = { path = "../afa-contracts" }
 # The in-process pub/sub bus (extracted to its own crate in
 # Phase 3 of the security pack so `afa-kernel` and
@@ -35,13 +37,16 @@ tokio = { version = "1", features = ["rt", "sync", "macros"] }
 tracing = "0.1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 # Used by `capability_registry::RegisterError` (the
 # "llm adapter already registered" closed-set). The
 # kernel itself is the only caller of `register_llm`,
 # so the error is a programmer-error, not a runtime
 # recovery path.
 thiserror = "1.0"
-# Pure-Rust hex decoder — used by `tests/boot_failures.rs`
+# Phase 3 Dashboard Transport dependencies.
+tower = { version = "0.5", features = ["util"] }
+sha2 = "0.10"
 # `read_master_key_from_env` to lift the `AFA_MASTER_KEY`
 # env-var string into a `MasterKey` (via
 # `MasterKey::from_hex`). The kernel's *production* boot
@@ -76,6 +81,7 @@ tempfile = "3"
 # test-only request-recording API and the native
 # tokio-friendly async server.
 wiremock = "0.6"
+http-body-util = "0.1"
 # Concrete LLM adapter for the Phase 4 end-to-end
 # integration test (`tests/llm_integration.rs`).
 # Used in the `dev-dependencies` section (not
@@ -113,3 +119,5 @@ afa-plugin-knowledge-json = { path = "../afa-plugin-knowledge-json" }
 # `dev-dependencies`-only to keep the production
 # binary free of the SQLite C bindings.
 rusqlite = { version = "0.31", features = ["bundled"] }
+sha2 = "0.10"
+hex = "0.4"

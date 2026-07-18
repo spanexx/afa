@@ -141,4 +141,5 @@ pub mod record;
 
 pub use error::ObservabilityError;
 pub use observability::{ObservabilityConfig, ObservabilityEngine};
+pub use purge::run_one_purge;
 pub use record::{record_span, record_span_value};

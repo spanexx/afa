@@ -101,6 +101,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 // CID:afa-observability-observability-001 - ObservabilityConfig
@@ -210,6 +211,7 @@ pub struct ObservabilityEngine {
     drops_in_last_hour: Arc<AtomicU64>,
     config: ObservabilityConfig,
     purge_handle: Option<tokio::task::JoinHandle<()>>,
+    span_broadcast: broadcast::Sender<SpanRecord>,
 }
 
 impl ObservabilityEngine {
@@ -268,6 +270,7 @@ impl ObservabilityEngine {
             })?;
 
         let drops_in_last_hour = Arc::new(AtomicU64::new(0));
+        let (span_broadcast, _) = broadcast::channel(1024);
 
         let mut engine = Arc::new(Self {
             storage: Arc::clone(&storage),
@@ -275,6 +278,7 @@ impl ObservabilityEngine {
             drops_in_last_hour: Arc::clone(&drops_in_last_hour),
             config,
             purge_handle: None,
+            span_broadcast,
         });
 
         if engine.config.purge_interval_hours > 0 && engine.config.retention_days.is_some() {
@@ -369,7 +373,10 @@ impl ObservabilityEngine {
         };
 
         match persistence::write_span(&self.storage, &record).await {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                let _ = self.span_broadcast.send(record);
+                Ok(())
+            }
             Err(e) => {
                 self.drops_in_last_hour.fetch_add(1, Ordering::Relaxed);
                 let event = afa_contracts::SpansWriteFailed {
@@ -408,6 +415,18 @@ impl ObservabilityEngine {
         &self.storage
     }
 
+    /// Hand out a `&EventBusHandle` so callers
+    /// outside the crate (notably the kernel's
+    /// integration tests) can pass it to
+    /// `purge::run_one_purge` without going
+    /// through the private field. The handle
+    /// is a cheap-to-clone shared bus publisher
+    /// (one per engine; the bus itself is
+    /// `Arc`-backed).
+    pub fn event_bus(&self) -> &EventBusHandle {
+        &self.event_bus
+    }
+
     // CID:afa-observability-observability-009 - config
     // Purpose: Borrow the engine's config snapshot.
     // Used by tests + future engine paths that
@@ -417,7 +436,16 @@ impl ObservabilityEngine {
         &self.config
     }
 
-    // CID:afa-observability-observability-010 - abort_purge_for_test
+    // CID:afa-observability-observability-011 - subscribe_spans
+    // Purpose: Subscribe to successfully persisted spans for
+    // the Dashboard Transport live stream. The channel is
+    // bounded so a slow dashboard client cannot block the
+    // observability write path.
+    // Used by: afa-kernel::dashboard::spans.
+    pub fn subscribe_spans(&self) -> broadcast::Receiver<SpanRecord> {
+        self.span_broadcast.subscribe()
+    }
+
     // Purpose: Abort the background purge task, if
     // one is running. Test-only helper (not part of
     // the Phase-1 public API).

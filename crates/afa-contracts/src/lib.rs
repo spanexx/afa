@@ -24,6 +24,11 @@
 //!   (`EmbeddingErrorV1`), the capabilities card
 //!   (`EmbeddingCapabilitiesV1`), and the three audit
 //!   events. See `embedding/mod.rs` for the Code Map.
+//! - `kernel`: The four-state lifecycle the kernel walks
+//!   through from `Booting` to `Full`
+//!   (`Booting → PreBootstrap → Sealing → Full`, with a
+//!   `Sealing → PreBootstrap` failure branch). See
+//!   `kernel.rs` for the Code Map.
 //! - `observability`: The v1 observability contract: the
 //!   `SpanRecord` / `SpanOutcome` shape (the one row in the
 //!   spans table), the `HealthStatus` / `HealthReport`
@@ -59,6 +64,7 @@
 //! CID:afa-contracts-lib-010 -> embedding
 //! CID:afa-contracts-lib-011 -> observability
 //! CID:afa-contracts-lib-012 -> storage
+//! CID:afa-contracts-lib-013 -> kernel
 //!
 //! Quick lookup: rg -n "CID:afa-contracts-lib-" crates/afa-contracts/src/lib.rs
 
@@ -176,6 +182,19 @@ pub mod observability;
 // engines' tables).
 pub mod storage;
 
+// CID:afa-contracts-lib-013 - kernel
+// Purpose: Re-export the kernel's four-state lifecycle
+// (`KernelMode`) and the helper predicates
+// (`is_sealed`, `is_pre_bootstrap`, etc.) the
+// dashboard transport uses to gate `/health`
+// responses and the future `POST /pre-bootstrap/seal`
+// endpoint. The `Display` impl is the wire shape
+// the dashboard surfaces verbatim. See `kernel.rs`
+// for the Code Map.
+// Used by: afa-kernel::dashboard (Phase 3 + Phase 4),
+// and the kernel's own boot path (Phase 4b).
+pub mod kernel;
+
 pub use embedding::{
     EmbeddingCapabilitiesV1, EmbeddingCompleted, EmbeddingErrorKind, EmbeddingErrorV1,
     EmbeddingFailed, EmbeddingRequested, EmbeddingV1, EmbeddingV1Version,
@@ -209,4 +228,10 @@ pub use security::{
 // Flatten the `Migration` DTO to the crate root so
 // `use afa_contracts::Migration;` works.
 pub use storage::Migration;
+// CID:afa-contracts-lib-013 re-exports - kernel
+// Flatten the `KernelMode` enum + helpers to the
+// crate root so callers can write
+// `use afa_contracts::KernelMode;` instead of
+// `use afa_contracts::kernel::KernelMode;`.
+pub use kernel::KernelMode;
 pub use versioning_example::{ExampleThingImpl, ExampleThingV1, ExampleThingV2};

@@ -32,13 +32,18 @@
 
 use crate::capability_registry::{CapabilityRegistry, RegisterError};
 use crate::event_bus::{EventBus, EventBusHandle};
+use crate::mode::ModeController;
 use crate::runtime::Runtime;
 use crate::scheduler::Scheduler;
-use afa_contracts::{EmbeddingV1, KnowledgeV1, LlmV1, SecurityErrorV1, SecurityV1, StorageError};
+use afa_contracts::{
+    EmbeddingV1, HealthCheck, HealthReport, HealthStatus, KnowledgeV1, LlmV1, SecurityErrorV1,
+    SecurityV1, StorageError,
+};
 use afa_observability::{ObservabilityConfig, ObservabilityEngine};
 use afa_security::{open_storage, MasterKey, SecurityEngine};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 // CID:kernel-001 - Kernel
 // Purpose: The top-level composition. Owns the
@@ -83,6 +88,13 @@ pub struct Kernel {
     /// and have the other clones see the
     /// registration immediately.
     capabilities: std::sync::Mutex<CapabilityRegistry>,
+    health_engines: RwLock<BTreeMap<String, Arc<dyn HealthCheck>>>,
+    /// The kernel's four-state lifecycle. Cloned
+    /// (the `ModeController` is internally
+    /// `Arc`-wrapped) so every kernel clone
+    /// observes the same transitions.
+    /// See `mode.rs` for the Code Map.
+    mode: Arc<crate::mode::ModeController>,
 }
 
 impl Kernel {
@@ -223,6 +235,40 @@ impl Kernel {
         // SQLite file.
         let security: Arc<dyn SecurityV1> = Arc::new(engine);
 
+        // CID:kernel-004 - day-0 mode detection
+        // Purpose: Determine the kernel's initial
+        // `Mode` from the security engine's
+        // `dashboard-token` state. The IMPL draft
+        // (per the Pack #6 §"Re-opens from Pack #7a")
+        // requires the kernel to inspect the vault
+        // at boot: if `dashboard-token` is sealed
+        // (any `lookup_hash` result, including
+        // `Ok(false)` for a wrong placeholder), the
+        // kernel starts in `Full`; if the engine
+        // returns `Err(SecretNotFound)`, the kernel
+        // starts in `PreBootstrap` and the operator
+        // must hit `POST /pre-bootstrap/seal` to
+        // continue. The old exit-78 path is gone —
+        // the kernel always boots; the `/health`
+        // handler surfaces the mode to load
+        // balancers via the `503 pre_bootstrap: true`
+        // response.
+        //
+        // The placeholder hash is a 64-zero-hex
+        // string (a valid SHA-256 hex shape; never
+        // matches a real stored hash, so the
+        // engine returns `Ok(false)` if the secret
+        // exists and `Err(SecretNotFound)` if it
+        // doesn't).
+        let placeholder_hash = "0".repeat(64);
+        let mode = match security
+            .lookup_hash("dashboard-token", &placeholder_hash)
+            .await
+        {
+            Ok(_) => ModeController::new_full(),
+            Err(_) => ModeController::new_pre_bootstrap(),
+        };
+
         // Step 4: build the `Runtime` over the
         // scheduler, the bus handle, and the
         // observability engine.
@@ -237,12 +283,72 @@ impl Kernel {
             scheduler,
             event_bus,
             security,
-            observability,
+            observability: Arc::clone(&observability),
             capabilities: std::sync::Mutex::new(CapabilityRegistry::new()),
+            health_engines: RwLock::new(BTreeMap::from([(
+                "afa-observability".to_string(),
+                Arc::clone(&observability) as Arc<dyn HealthCheck>,
+            )])),
+            mode: Arc::new(mode),
         })
     }
 
-    /// Borrow the `Runtime` (the single ingress point).
+    /// Return the kernel's current lifecycle
+    /// state. See `mode.rs` for the transition
+    /// logic; this is a read-only view.
+    /// Used by: the dashboard `/health` handler,
+    /// the bearer auth middleware (Phase 4b), and
+    /// the `POST /pre-bootstrap/seal` handler.
+    pub fn mode(&self) -> crate::mode::Mode {
+        self.mode.current()
+    }
+
+    /// Hand out a `&ModeController` so the
+    /// dashboard handlers (notably
+    /// `pre_bootstrap::handler`) can drive the
+    /// transition methods without going through
+    /// the read-only `mode()` accessor. The
+    /// controller is internally `Arc`-shared,
+    /// so cloning it is cheap.
+    /// Used by: `dashboard::pre_bootstrap::handler`.
+    pub fn mode_controller(&self) -> &crate::mode::ModeController {
+        &self.mode
+    }
+
+    /// Build a health report from the kernel's
+    /// registered `HealthCheck` engines. The
+    /// observability engine is seeded at boot;
+    /// future engines register via the same
+    /// `RwLock<BTreeMap>` and become visible
+    /// on `/health` immediately. Overall status
+    /// is worst-wins: Unhealthy > Degraded > Healthy.
+    pub fn aggregate_health(&self) -> HealthReport {
+        let engines: BTreeMap<String, HealthStatus> = self
+            .health_engines
+            .read()
+            .expect("health engines lock")
+            .iter()
+            .map(|(name, engine)| (name.clone(), engine.health_check()))
+            .collect();
+        let overall = engines
+            .values()
+            .cloned()
+            .reduce(|acc, status| match (acc, status) {
+                (HealthStatus::Unhealthy { reason }, _)
+                | (_, HealthStatus::Unhealthy { reason }) => HealthStatus::Unhealthy { reason },
+                (HealthStatus::Degraded { reason }, _) | (_, HealthStatus::Degraded { reason }) => {
+                    HealthStatus::Degraded { reason }
+                }
+                (HealthStatus::Healthy, HealthStatus::Healthy) => HealthStatus::Healthy,
+            })
+            .unwrap_or(HealthStatus::Healthy);
+        HealthReport {
+            overall,
+            engines,
+            checked_at: chrono::Utc::now(),
+        }
+    }
+
     /// `Runtime` is the only way to send an event into
     /// the kernel; there is no other path.
     pub fn runtime(&self) -> &Runtime {
@@ -507,6 +613,13 @@ impl Clone for Kernel {
             security: Arc::clone(&self.security),
             observability: Arc::clone(&self.observability),
             capabilities: std::sync::Mutex::new(capabilities),
+            health_engines: RwLock::new(
+                self.health_engines
+                    .read()
+                    .expect("health engines lock")
+                    .clone(),
+            ),
+            mode: Arc::clone(&self.mode),
         }
     }
 }
