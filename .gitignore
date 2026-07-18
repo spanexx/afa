@@ -10,3 +10,7 @@
 
 # Agent tooling state (not part of the product)
 /.task-manager/
+
+# Local review scratch spaces (out-of-cwd docs copied in for opencode)
+/.review-tmp/
+/reports/
