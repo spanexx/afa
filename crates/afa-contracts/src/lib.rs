@@ -65,6 +65,7 @@
 //! CID:afa-contracts-lib-011 -> observability
 //! CID:afa-contracts-lib-012 -> storage
 //! CID:afa-contracts-lib-013 -> kernel
+//! CID:afa-contracts-lib-014 -> cli
 //!
 //! Quick lookup: rg -n "CID:afa-contracts-lib-" crates/afa-contracts/src/lib.rs
 
@@ -182,6 +183,19 @@ pub mod observability;
 // engines' tables).
 pub mod storage;
 
+// CID:afa-contracts-lib-014 - cli
+// Purpose: Re-export the `afa-cli` shared wire +
+// state types (`PreBootstrapState`,
+// `PreBootstrapSealRequest`, `PreBootstrapSealResponse`,
+// `SecretListEntry`). These mirror the wire shapes
+// the kernel's `POST /pre-bootstrap/seal` handler
+// already accepts; the CLI uses them to build the
+// same body as the dashboard's SPA Setup Wizard.
+// Used by: `afa-cli` (future pack) and the
+// kernel's `dashboard::pre_bootstrap` adapter.
+// See `cli.rs` for the Code Map.
+pub mod cli;
+
 // CID:afa-contracts-lib-013 - kernel
 // Purpose: Re-export the kernel's four-state lifecycle
 // (`KernelMode`) and the helper predicates
@@ -227,6 +241,9 @@ pub use security::{
 // CID:afa-contracts-lib-012 re-exports - storage
 // Flatten the `Migration` DTO to the crate root so
 // `use afa_contracts::Migration;` works.
+pub use cli::{
+    PreBootstrapSealRequest, PreBootstrapSealResponse, PreBootstrapState, SecretListEntry,
+};
 pub use storage::Migration;
 // CID:afa-contracts-lib-013 re-exports - kernel
 // Flatten the `KernelMode` enum + helpers to the
